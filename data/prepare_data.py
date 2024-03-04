@@ -9,7 +9,7 @@ from datasets import load_dataset
 
 num_proc = 32
 enc = Tokenizer("llama/models/tokenizer.model")
-save_data_path = 'data/datasets/openwebtext'
+save_data_path = '/data/datasets/openwebtext'
 
 if __name__ == "__main__":
     data = load_dataset("openwebtext", num_proc=num_proc)

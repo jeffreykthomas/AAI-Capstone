@@ -1,245 +1,186 @@
+import os
 import torch
-from llama import chat_model
-from llama.tokenizer import Tokenizer
+from llama import model as llama_model
 import wandb
 from datetime import datetime
-from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import autocast, GradScaler
-import torch.nn.functional as F
 import numpy as np
 from transformers import get_linear_schedule_with_warmup
 
 # Model Configuration
 vocab_size = 32000  # Vocabulary size of the pre-trained SentencePiece model
-max_length = 128  # Maximum sequence length
+max_length = 256  # Maximum sequence length
 n_layers = 6  # Number of transformer layers
-n_heads = 8  # Number of attention heads
-d_model = 512  # Dimension of the transformer model
+n_heads = 6  # Number of attention heads
+d_model = 288  # Dimension of the transformer model
 d_ff = 2048  # Dimension of the feed-forward layer
 dropout = 0.1  # Dropout rate
+max_batch_size = 128  # Batch size
+
+# Training Configuration
+warmup_steps = 2000
+num_train_steps = 600000
+min_lr = 6e-5
+learning_rate = 6e-4
+grad_clip = 1.0
+weight_decay = 0.01
+beta1 = 0.9
+beta2 = 0.95
+accumulation_steps = 8  # Number of steps to accumulate gradients
+eval_steps = 200  # Number of steps between evaluation of the model
+eval_iters = 10  # Number of iterations to evaluate the model
 
 # wandb logging
-wandb_project = "Llama-Chatbot"
+wandb_project = "Llama-Health-Chatbot"
 wandb_run_name = "run" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-data_folder = 'data/'
+data_folder = '/data/datasets/openwebtext'
+output_dir = '/data/models/llama_health'
+
+# Create output directory if it doesn't exist
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
 
 # Initialize the model
-model_config = chat_model.TransformerConfig()
+model_config = llama_model.TransformerConfig()
 model_config.model_dimension = d_model
 model_config.num_layers = n_layers
 model_config.num_attention_heads = n_heads
 model_config.vocabulary_size = vocab_size
 model_config.swiglu_multiple = 256
 model_config.normalization_epsilon = 1e-5
-model_config.max_batch_size = 32
+model_config.max_batch_size = max_batch_size
 model_config.max_sequence_length = max_length
 
 
-class CustomDataset(Dataset):
-	def __init__(self, input_encodings):
-		self.input_encodings = input_encodings
-
-	def __getitem__(self, idx):
-		input_item = {key: self.input_encodings[key][idx] for key in self.input_encodings}
-		return input_item
-
-	def __len__(self):
-		return len(self.input_encodings['input_ids'])
-
-
-class PadCollate():
-	def __init__(self, pad_id):
-		self.pad_id = pad_id
-
-	def pad_collate(self, batch):
-		input_ids, attn_masks = [], []
-		max_len = max(len(seqs['input_ids']) for seqs in batch)  # Find the maximum sequence length in this batch
-
-		for idx, seqs in enumerate(batch):
-			pad_len = max_len - len(seqs['input_ids'])  # Calculate how much padding is needed
-
-			input_ids.append(F.pad(torch.LongTensor(seqs['input_ids'].long()), (pad_len, 0), value=self.pad_id))
-			attn_masks.append(
-				F.pad(torch.LongTensor(seqs['attention_mask'].long()), (pad_len, 0), value=0))
-
-		# Stack the tensors along a new dimension
-		input_ids = torch.stack(input_ids)
-		attn_masks = torch.stack(attn_masks)
-
-		x_encodings = {'input_ids': input_ids,
-		               'attention_mask': attn_masks}
-
-		return x_encodings
-
-
-def load_data(train_X, val_X, test_X, pad_id):
-	ppd = PadCollate(pad_id)
-	train_dataset = CustomDataset(train_X)
-	val_dataset = CustomDataset(val_X)
-	test_dataset = CustomDataset(test_X)
-
-	# Create the dataloader
-	train_loader = DataLoader(train_dataset, batch_size=model_config.max_batch_size, shuffle=True,
-	                          collate_fn=ppd.pad_collate)
-	val_loader = DataLoader(val_dataset, batch_size=model_config.max_batch_size, shuffle=False,
-	                        collate_fn=ppd.pad_collate)
-	test_loader = DataLoader(test_dataset, batch_size=model_config.max_batch_size, shuffle=False,
-	                         collate_fn=ppd.pad_collate)
-
-	return train_loader, val_loader, test_loader
+def get_batch(split, data_dir, block_size, batch_size, device, device_type='cuda'):
+    # We recreate np.memmap every batch to avoid a memory leak, as per
+    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
 
 
 def run_training():
-	wandb.init(project=wandb_project, name=wandb_run_name)
-	num_train_epochs = 3
-	accumulation_steps = 4
+    wandb.init(project=wandb_project, name=wandb_run_name)
 
-	tokenizer = Tokenizer(model_path='tokenizer.model')
-	pad_id = tokenizer.pad_id
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-	# Initialize the scaler
-	scaler = GradScaler()
+    scaler = GradScaler()
+    model = llama_model.TransformerModel(model_config)
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device)
 
-	train_encodings = torch.load(data_folder + 'train_encodings.pt')
-	val_encodings = torch.load(data_folder + 'val_encodings.pt')
-	test_encodings = torch.load(data_folder + 'test_encodings.pt')
+    if torch.cuda.device_count() > 1:
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        model = torch.nn.DataParallel(model)
 
-	train_loader, val_loader, test_loader = load_data(train_encodings, val_encodings, test_encodings, pad_id)
+    model = model.to(device)
 
-	num_train_steps = len(train_loader) // accumulation_steps * num_train_epochs
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_train_steps
+    )
+    unoptimized_model = model
+    model = torch.compile(model)
 
-	model = chat_model.TransformerModel(model_config)
+    best_val_loss = float('inf')
+    global_step = 0
 
-	if torch.cuda.device_count() > 1:
-		print("Let's use", torch.cuda.device_count(), "GPUs!")
-		model = torch.nn.DataParallel(model)
+    for step in range(num_train_steps):
+        model.train()
+        batch_size = max_batch_size // accumulation_steps
+        X, y = get_batch('train', data_folder, max_length, batch_size, device)
+        # Move tensors to the device
 
-	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-	model = model.to(device)
+        with autocast():
+            # Forward pass
+            logits = model(X, y)
+            loss = model.last_loss
+            # Normalize the loss
+            loss = loss / accumulation_steps
 
-	optimizer = torch.optim.AdamW(lr=5e-5, eps=1e-8)
-	scheduler = get_linear_schedule_with_warmup(
-		optimizer, num_warmup_steps=0, num_training_steps=num_train_steps
-	)
+        # Backward pass and optimization
+        scaler.scale(loss).backward()
 
-	best_val_loss = float('inf')
-	global_step = 0
+        # Update only after accumulating gradients for n steps
+        if (step + 1) % accumulation_steps == 0:
+            # Update step count
+            global_step += 1
 
-	for epoch in range(num_train_epochs):
-		model.train()
-		for batch_idx, batch in enumerate(train_loader):
-			# Move tensors to the device
-			input_ids = batch['input_ids'].to(device)
-			attention_mask = batch.get('attention_mask', None)
-			if attention_mask is not None:
-				attention_mask = attention_mask.to(device)
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-			target_ids = batch['input_ids'].to(device)
+            # Perform optimization step
+            scaler.step(optimizer)
+            scaler.update()
 
-			with autocast():
-				# Forward pass
-				outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=target_ids)
-				loss = outputs.loss.mean()
+            # Zero gradients
+            optimizer.zero_grad()
 
-			# Normalize the loss
-			loss = loss / accumulation_steps
+            # Update learning rate schedule
+            scheduler.step()
 
-			# Backward pass and optimization
-			scaler.scale(loss).backward()
+            print(
+                f'\rTraining step {step + 1}/{num_train_steps}, scaled_loss: {loss.item()}, '
+                f'effective_loss: {loss.item() * accumulation_steps}',
+                end='',
+                flush=True)
 
-			# Update only after accumulating gradients for n steps
-			if (batch_idx + 1) % accumulation_steps == 0:
-				# Update step count
-				global_step += 1
+        # Validation loop
+        if step % eval_steps == 0:
+            model.eval()
+            val_losses = torch.zeros(eval_iters)
+            with torch.no_grad():
+                for val_step in range(eval_iters):
+                    X_val, y_val = get_batch('val', data_folder, max_length, batch_size, device)
 
-				# Clip gradients
-				torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    with autocast():
+                        # Forward pass
+                        val_logits = model(X_val, y_val)
+                        val_loss = model.last_loss
 
-				# Perform optimization step
-				scaler.step(optimizer)
-				scaler.update()
+                    val_losses[val_step] = val_loss.item()
 
-				# Zero gradients
-				optimizer.zero_grad()
+            val_loss = val_losses.mean()
 
-				# Update learning rate schedule
-				scheduler.step()
+            wandb.log(
+                {
+                    'global_step': global_step,
+                    'loss': loss.item() * accumulation_steps,
+                    'val_loss': val_loss,
+                    'lr': scheduler.get_last_lr()[0]})
+            print(
+                f'\nStep {step + 1}, '
+                f'loss: {loss.item() * accumulation_steps}, '
+                f'val_loss: {val_loss}')
 
-				print(
-					f'\rEpoch {epoch + 1}, batch: {batch_idx + 1}/{len(train_loader)}, scaled_loss: {loss.item()}, '
-					f'effective_loss: {loss.item() * accumulation_steps}',
-					end='',
-					flush=True)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                # Save the model
 
-			# Validation loop
-			if batch_idx % 1000 == 0:
-				max_val_batches = 64
-				# choose random indices to evaluate on
-				random_indices = np.random.randint(0, len(val_loader), max_val_batches)
-				model.eval()
-				val_losses = []
-				with torch.no_grad():
-					for val_idx, batch in enumerate(val_loader):
-						if val_idx not in random_indices:
-							continue
-						# Move tensors to the device
-						val_input_ids = batch['input_ids'].to(device)
-						val_attention_mask = batch.get('attention_mask', None)
-						if val_attention_mask is not None:
-							val_attention_mask = val_attention_mask.to(device)
-						val_target_ids = batch['input_ids'].to(device)
+                checkpoint = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'model_config': model_config,
+                    'scaler': scaler.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'global_step': global_step
+                }
+                print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
+                torch.save(checkpoint, os.path.join(output_dir, 'best_chat_llama_model.pt'))
 
-						with autocast():
-							# Forward pass
-							outputs = model(
-								input_ids=val_input_ids,
-								attention_mask=val_attention_mask,
-								labels=val_target_ids
-							)
-
-							val_loss = outputs.loss.mean()
-							val_losses.append(val_loss.item())
-
-							# print out a sample of the validation set
-							if val_idx == random_indices[0]:
-								print(f'\nContext: {tokenizer.decode(val_input_ids[0])}')
-								print(
-									f'Generated output: {tokenizer.decode(outputs.logits[0].argmax(dim=-1))}')
-								labels = val_target_ids.where(val_target_ids != -100, tokenizer.pad_id)
-								print(f'Ground truth: {tokenizer.decode(labels[0])}')
-
-				combined_val_loss = sum(val_losses) / len(val_losses)
-				wandb.log(
-					{
-						'global_step': global_step,
-						'loss': loss.item() * accumulation_steps,
-						'val_loss': combined_val_loss,
-						'lr': scheduler.get_last_lr()[0]})
-				print(
-					f'\nEpoch {epoch + 1}, '
-					f'batch: {batch_idx + 1}/{len(train_loader)}, '
-					f'loss: {loss.item() * accumulation_steps}, '
-					f'val_loss: {combined_val_loss}')
-
-				if combined_val_loss < best_val_loss:
-					best_val_loss = combined_val_loss
-					# Save the model
-
-					checkpoint = {
-						'model': model.state_dict(),
-						'optimizer': optimizer.state_dict(),
-						'model_config': model_config,
-						'scaler': scaler.state_dict(),
-						'scheduler': scheduler.state_dict(),
-						'best_val_loss': best_val_loss,
-						'global_step': global_step
-					}
-					print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
-					torch.save(checkpoint, 'best_model.pt')
-
-				model.train()
+            model.train()
 
 
 if __name__ == '__main__':
-	run_training()
+    run_training()
