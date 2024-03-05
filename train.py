@@ -10,10 +10,9 @@ from transformers import get_linear_schedule_with_warmup
 # Model Configuration
 vocab_size = 32000  # Vocabulary size of the pre-trained SentencePiece model
 max_length = 256  # Maximum sequence length
-n_layers = 6  # Number of transformer layers
-n_heads = 6  # Number of attention heads
-d_model = 288  # Dimension of the transformer model
-d_ff = 2048  # Dimension of the feed-forward layer
+n_layers = 16  # Number of transformer layers
+n_heads = 16  # Number of attention heads
+d_model = 2048  # Dimension of the transformer model
 dropout = 0.1  # Dropout rate
 max_batch_size = 128  # Batch size
 
@@ -26,8 +25,8 @@ grad_clip = 1.0
 weight_decay = 0.01
 beta1 = 0.9
 beta2 = 0.95
-accumulation_steps = 8  # Number of steps to accumulate gradients
-eval_steps = 200  # Number of steps between evaluation of the model
+accumulation_steps = 16  # Number of steps to accumulate gradients
+eval_steps = 2000  # Number of steps between evaluation of the model
 eval_iters = 10  # Number of iterations to evaluate the model
 
 # wandb logging
@@ -46,11 +45,15 @@ model_config = llama_model.TransformerConfig()
 model_config.model_dimension = d_model
 model_config.num_layers = n_layers
 model_config.num_attention_heads = n_heads
+model_config.num_kv_heads = n_heads
 model_config.vocabulary_size = vocab_size
-model_config.swiglu_multiple = 256
+model_config.swiglu_multiple = 32
 model_config.normalization_epsilon = 1e-5
 model_config.max_batch_size = max_batch_size
 model_config.max_sequence_length = max_length
+model_config.dropout_rate = dropout
+
+dtype = torch.bfloat16
 
 
 def get_batch(split, data_dir, block_size, batch_size, device, device_type='cuda'):
@@ -78,11 +81,13 @@ def run_training():
 
     scaler = GradScaler()
     model = llama_model.TransformerModel(model_config)
+    # Print number of parameters
+    print(f'Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device)
 
-    if torch.cuda.device_count() > 1:
-        print("Let's use", torch.cuda.device_count(), "GPUs!")
-        model = torch.nn.DataParallel(model)
+    # if torch.cuda.device_count() > 1:
+    #     print("Let's use", torch.cuda.device_count(), "GPUs!")
+    #     model = torch.nn.DataParallel(model)
 
     model = model.to(device)
 
