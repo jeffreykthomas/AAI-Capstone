@@ -219,9 +219,9 @@ class MultiHeadAttention(nn.Module):
         if not self.flash:
             print('WARNING: Using PyTorch native attention. This is not recommended for large models. '
                   'Upgrade to PyTorch >= 2.0')
-        mask = torch.full((1, 1, config.max_sequence_length, config.max_sequence_length), float("-inf"))
-        mask = torch.triu(mask, diagonal=1)
-        self.register_buffer("mask", mask)
+            mask = torch.full((1, 1, config.max_sequence_length, config.max_sequence_length), float("-inf"))
+            mask = torch.triu(mask, diagonal=1)
+            self.register_buffer("mask", mask)
 
     def forward(
         self,

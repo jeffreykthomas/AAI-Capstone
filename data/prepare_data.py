@@ -2,25 +2,94 @@
 # from project root run: python -m data.prepare_data
 
 import os
+import random
+import glob
 from tqdm import tqdm
 import numpy as np
 from llama.tokenizer import Tokenizer
 from datasets import load_dataset
+import torch
+import torch.distributed as dist
 
 num_proc = 32
 enc = Tokenizer("llama/models/tokenizer.model")
 save_data_path = '/data/datasets/openwebtext'
 
+
+class PretokDataset(torch.utils.data.IterableDataset):
+    """Loads pretokenized examples from disk and yields them as PyTorch tensors."""
+
+    def __init__(self, split, max_seq_len, vocab_size):
+        super().__init__()
+        self.split = split
+        self.max_seq_len = max_seq_len
+        self.vocab_size = vocab_size
+
+    def __iter__(self):
+        # get worker info within a DataLoader
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        # get DDP rank info
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        # combine the worker_id and worker_rank to create a unique seed for rng
+        seed = 42 + worker_id + 1337 * rank
+        rng = random.Random(seed)
+        print(f'\nCreated a pre-tokenized Dataset with rng seed {seed}')
+
+        # the .bin files are right along the .json files
+        bin_dir = save_data_path
+        shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
+
+        # train/test split. let's use only shard 0 for test split, rest train
+        shard_filenames = shard_filenames[1:] if self.split == "train" else shard_filenames[:1]
+        assert len(shard_filenames) > 0, f"No bin files found in {bin_dir}"
+        while True:
+            rng.shuffle(shard_filenames)
+            for shard in shard_filenames:
+                # open the dataset for reading but keep it on disk with memmap
+                m = np.memmap(shard, dtype=np.uint16, mode="r")
+                num_batches = len(m) // self.max_seq_len
+                num_batches -= 1  # drop the last partial batch
+                assert num_batches > 0, "this shard is way too small? investigate."
+                ixs = list(range(num_batches))
+                rng.shuffle(ixs)
+                for ix in ixs:
+                    start = ix * self.max_seq_len
+                    end = start + self.max_seq_len + 1
+                    # calling .astype will copy the data into a new numpy array, now in RAM
+                    chunk = torch.from_numpy((m[start:end]).astype(np.int64))
+                    x = chunk[:-1]
+                    y = chunk[1:]
+                    yield x, y
+
+
+class Task:
+
+    @staticmethod
+    def iter_batches(batch_size, device, num_workers=0, **dataset_kwargs):
+        ds = PretokDataset(**dataset_kwargs)
+        dl = torch.utils.data.DataLoader(
+            ds, batch_size=batch_size, pin_memory=True, num_workers=num_workers
+        )
+        for x, y in dl:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            yield x, y
+
+
 if __name__ == "__main__":
     data = load_dataset("openwebtext", num_proc=num_proc)
     train_val_dataset = data["train"].train_test_split(test_size=0.0005, seed=42, shuffle=True)
-    train_val_dataset['val'] = train_val_dataset.pop('test') # rename test to val
+    train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
     os.makedirs(save_data_path, exist_ok=True)
+
 
     def process_dataset(example):
         text = example['text']
-        tokens = enc.encode(text, bos=True, eos=True)
+        text.strip()
+        tokens = enc.encode(text, bos=True, eos=False)
         return {"ids": tokens, "len": len(tokens)}
+
 
     # tokenize the data
     tokenized_data = train_val_dataset.map(process_dataset, remove_columns=["text"], num_proc=num_proc)
