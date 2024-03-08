@@ -34,7 +34,7 @@ class PretokDataset(torch.utils.data.IterableDataset):
         # combine the worker_id and worker_rank to create a unique seed for rng
         seed = 42 + worker_id + 1337 * rank
         rng = random.Random(seed)
-        print(f'\nCreated a pre-tokenized Dataset with rng seed {seed}')
+        print(f'\nRank {rank}, Worker {worker_id}: Created a pre-tokenized Dataset with rng seed {seed}')
 
         # the .bin files are right along the .json files
         bin_dir = save_data_path

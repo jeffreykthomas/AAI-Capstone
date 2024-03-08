@@ -1,6 +1,6 @@
 import os
 from functools import partial
-import numpy as np
+import time
 
 import wandb
 from datetime import datetime
@@ -18,31 +18,31 @@ from transformers import get_cosine_schedule_with_warmup
 # Model Configuration
 vocab_size = 32000  # Vocabulary size of the pre-trained SentencePiece model
 max_length = 1024  # Maximum sequence length
-n_layers = 16  # Number of transformer layers
-n_heads = 16  # Number of attention heads
+num_layers = 16  # Number of transformer layers
+num_heads = 16  # Number of attention heads
 d_model = 2048  # Dimension of the transformer model
-dropout = 0.0  # Dropout rate
+dropout = 0.1  # Dropout rate
 micro_batch_size = 8  # Batch size per GPU
 compile_model = True  # Whether to compile the model
 
 # Training Configuration
-warmup_steps = 500
-num_train_steps = 600000
+warmup_steps = 1000
 accumulation_steps = 32  # Number of steps to accumulate gradients
-num_global_steps = num_train_steps // accumulation_steps
+num_global_steps = 100000  # Number of global steps
 min_lr = 3e-5
-learning_rate = 3e-3
+learning_rate = 3e-4
 lr_decay_iters = num_global_steps
 grad_clip = 1.0
 weight_decay = 0.01
 beta1 = 0.9
 beta2 = 0.95
-eval_steps = 2000  # Number of steps between evaluation of the model
+eval_steps = 50  # Number of steps between evaluation of the model
 eval_iters = 100  # Number of iterations to evaluate the model
+log_interval = 4  # Number of steps between logging
 
 # wandb logging
-wandb_project = "Llama-Health-Chatbot"
-wandb_run_name = "run" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+wandb_project = 'Llama-Health-Chatbot'
+wandb_run_name = 'run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
 data_folder = '/data/datasets/openwebtext'
 output_dir = '/data/models/llama_health'
@@ -50,14 +50,14 @@ output_dir = '/data/models/llama_health'
 # Initialize the model
 model_config = llama_model.TransformerConfig()
 model_config.model_dimension = d_model
-model_config.num_layers = n_layers
-model_config.num_attention_heads = n_heads
-model_config.num_kv_heads = n_heads
+model_config.num_layers = num_layers
+model_config.num_attention_heads = num_heads
+model_config.num_kv_heads = num_heads
 model_config.vocabulary_size = vocab_size
-model_config.swiglu_multiple = 32
-model_config.normalization_epsilon = 1e-5
-model_config.max_sequence_length = max_length
-model_config.dropout_rate = dropout
+model_config.multiple_of = 32
+model_config.norm_eps = 1e-5
+model_config.max_seq_len = max_length
+model_config.dropout = dropout
 
 dtype = 'bfloat16'  # Data type for the model
 
@@ -98,7 +98,7 @@ iter_batches = partial(
     max_seq_len=max_length,
     vocab_size=vocab_size,
     device=device_type,
-    num_workers=0,
+    num_workers=16,
 )
 
 
@@ -108,17 +108,17 @@ def run_training():
 
     scaler = GradScaler()
     device = torch.device(ddp_device if ddp else device_type)
-    model = llama_model.TransformerModel(model_config)
+    model = llama_model.Transformer(model_config)
     model = model.to(device)
     if compile_model:
-        print('Compiling model...')
         unoptimized_model = model
         model = torch.compile(model)
 
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device.type)
 
     # Print number of parameters
-    print(f'Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
+    if master_process:
+        print(f'Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
 
     if ddp:
         # Need to ignore the 'freqs_cis' parameter in the DDP wrapper
@@ -134,7 +134,7 @@ def run_training():
     def estimate_loss():
         out = {}
         model.eval()
-        for split in ["train", "val"]:
+        for split in ['train', 'val']:
             batch_iter = iter_batches(split=split)
             losses = torch.zeros(eval_iters)  # keep on CPU
             for k in range(eval_iters):
@@ -148,52 +148,16 @@ def run_training():
         return out
 
     best_val_loss = float('inf')
-    global_step = 0
-    train_batch_iter = iter_batches(split="train")
+    local_iter_num = 0
+    running_mfu = -1.0
+    raw_model = model.module if ddp else model
+    train_batch_iter = iter_batches(split='train')
+    X, y = next(train_batch_iter)  # first batch
+    t0 = time.time()
 
-    for step in range(num_train_steps):
-        model.train()
-        raw_model = model.module if ddp else model
-        X, y = next(train_batch_iter)
-        if ddp:
-            model.require_backward_grad_sync = (step + 1) % accumulation_steps == 0
-        with autocast(dtype=ptdtype):
-            # Forward pass
-            logits = model(X, y)
-            loss = raw_model.last_loss
-            # Normalize the loss
-            loss = loss / accumulation_steps
-
-        # Backward pass and optimization
-        scaler.scale(loss).backward()
-
-        # Update only after accumulating gradients for n steps
-        if (step + 1) % accumulation_steps == 0:
-            # Update step count
-            global_step += 1
-
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-
-            # Perform optimization step
-            scaler.step(optimizer)
-            scaler.update()
-
-            # Zero gradients
-            optimizer.zero_grad()
-
-            # Update learning rate schedule
-            scheduler.step()
-            if master_process:
-                print(
-                    f'\rTraining step {global_step + 1}/{num_global_steps}, scaled_loss: {loss.item()}, '
-                    f'effective_loss: {loss.item() * accumulation_steps}',
-                    end='',
-                    flush=True)
-
+    for global_step in range(num_global_steps):
         # Validation loop
-        if step % eval_steps == 0 and master_process:
-            model.eval()
+        if global_step % eval_steps == 0 and master_process:
             losses = estimate_loss()
             val_loss = losses['val']
             train_loss = losses['train']
@@ -202,29 +166,77 @@ def run_training():
                     'global_step': global_step,
                     'loss': train_loss,
                     'val_loss': val_loss,
-                    'lr': scheduler.get_last_lr()[0]})
+                    'lr': scheduler.get_last_lr()[0],
+                    'mfu': running_mfu * 100,
+                }
+            )
             print(
-                f'\nStep {step + 1}, '
+                f'\nStep {global_step + 1}, '
                 f'loss: {train_loss}, '
                 f'val_loss: {val_loss}, ')
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 # Save the model
+                if global_step > 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'model_config': model_config,
+                        'scaler': scaler.state_dict(),
+                        'scheduler': scheduler.state_dict(),
+                        'best_val_loss': best_val_loss,
+                        'global_step': global_step
+                    }
+                    print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
+                    torch.save(checkpoint, os.path.join(output_dir, 'best_chat_llama_model.pt'))
 
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_config': model_config,
-                    'scaler': scaler.state_dict(),
-                    'scheduler': scheduler.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'global_step': global_step
-                }
-                print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
-                torch.save(checkpoint, os.path.join(output_dir, 'best_chat_llama_model.pt'))
+        model.train()
 
-            model.train()
+        for micro_step in range(accumulation_steps):
+            if ddp:
+                model.require_backward_grad_sync = micro_step == accumulation_steps - 1
+            with autocast(dtype=ptdtype):
+                # Forward pass
+                logits = model(X, y)
+                loss = raw_model.last_loss
+                # Normalize the loss
+                loss = loss / accumulation_steps
+            X, y = next(train_batch_iter)
+            scaler.scale(loss).backward()
+
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+        # Perform optimization step
+        scaler.step(optimizer)
+        scaler.update()
+
+        # Zero gradients
+        optimizer.zero_grad()
+        scheduler.step()
+
+        t1 = time.time()
+        dt = t1 - t0
+        t0 = t1
+
+        if global_step % log_interval == 0 and master_process:
+            lossf = loss.item() * accumulation_steps
+            if local_iter_num >= 5:
+                mfu = raw_model.estimate_mfu(micro_batch_size * accumulation_steps, dt)
+                running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+            print(
+                f'\r{global_step + 1}/{num_global_steps} | '
+                f'loss {lossf:.4f} | '
+                f'lr {scheduler.get_last_lr()[0]:e} | '
+                f'{dt*1000:.2f}ms | '
+                f'mfu {running_mfu*100:.2f}%',
+                end='',
+                flush=True
+            )
+
+        local_iter_num += 1
 
     if ddp:
         destroy_process_group()
