@@ -2,6 +2,7 @@
 # from project root run: python -m data.prepare_data
 
 import os
+import sys
 import random
 import glob
 from tqdm import tqdm
@@ -12,12 +13,40 @@ import torch
 import torch.distributed as dist
 
 num_proc = 32
-enc = Tokenizer("llama/models/tokenizer.model")
-save_data_path = '/data/datasets/openwebtext'
+enc = Tokenizer('llama/models/tokenizer.model')
+
+dataset = 'openwebtext'
+
+if dataset == 'openwebtext':
+    save_data_path = '/data/datasets/openwebtext'
+else:
+    save_data_path = '/data/datasets/slim-pajama-tokenized'
+
+cache_dir = os.environ.get('HF_HOME', None)
+if cache_dir is None:
+    print('Cache directory is not specified. Please set the HF_HOME environment variable or specify a cache_dir.')
+    sys.exit(1)
+
+# Check if the directory exists
+if not os.path.exists(cache_dir):
+    print(f'Cache directory does not exist: {cache_dir}')
+    sys.exit(1)
+
+# Check if the directory is writable
+if not os.access(cache_dir, os.W_OK):
+    print(f'Cache directory is not writable: {cache_dir}')
+    sys.exit(1)
+
+# Check if the directory is readable
+if not os.access(cache_dir, os.R_OK):
+    print(f'Cache directory is not readable: {cache_dir}')
+    sys.exit(1)
+
+print(f'Using cache directory: {cache_dir}')
 
 
 class PretokDataset(torch.utils.data.IterableDataset):
-    """Loads pretokenized examples from disk and yields them as PyTorch tensors."""
+    '''Loads pretokenized examples from disk and yields them as PyTorch tensors.'''
 
     def __init__(self, split, max_seq_len, vocab_size):
         super().__init__()
@@ -38,19 +67,19 @@ class PretokDataset(torch.utils.data.IterableDataset):
 
         # the .bin files are right along the .json files
         bin_dir = save_data_path
-        shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
+        shard_filenames = sorted(glob.glob(os.path.join(bin_dir, '*.bin')))
 
-        # train/test split. let's use only shard 0 for test split, rest train
-        shard_filenames = shard_filenames[1:] if self.split == "train" else shard_filenames[:1]
-        assert len(shard_filenames) > 0, f"No bin files found in {bin_dir}"
+        # train/val split. train.bin for train, val.bin for val
+        shard_filenames = shard_filenames[:1] if self.split == 'train' else shard_filenames[1:]
+        assert len(shard_filenames) > 0, f'No bin files found in {bin_dir}'
         while True:
             rng.shuffle(shard_filenames)
             for shard in shard_filenames:
                 # open the dataset for reading but keep it on disk with memmap
-                m = np.memmap(shard, dtype=np.uint16, mode="r")
+                m = np.memmap(shard, dtype=np.uint16, mode='r')
                 num_batches = len(m) // self.max_seq_len
                 num_batches -= 1  # drop the last partial batch
-                assert num_batches > 0, "this shard is way too small? investigate."
+                assert num_batches > 0, 'this shard is too small, investigate.'
                 ixs = list(range(num_batches))
                 rng.shuffle(ixs)
                 for ix in ixs:
@@ -77,10 +106,45 @@ class Task:
             yield x, y
 
 
-if __name__ == "__main__":
-    data = load_dataset("openwebtext", num_proc=num_proc)
-    train_val_dataset = data["train"].train_test_split(test_size=0.0005, seed=42, shuffle=True)
-    train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
+# Function to filter out unwanted set names
+def filter_fn(example):
+    return example['meta']['redpajama_set_name'] not in excluded_sets
+
+
+if __name__ == '__main__':
+    if dataset == 'openwebtext':
+        data = load_dataset('openwebtext', num_proc=num_proc)
+        train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
+        train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
+    else:
+        # Define a list of set names to exclude
+        excluded_sets = ['RedPajamaGithub']
+
+        train_data_files_pattern = '/data/datasets/SlimPajama-627B/train/chunk*/**/*.jsonl.zst'
+        val_data_files_pattern = '/data/datasets/SlimPajama-627B/validation/chunk*/**/*.jsonl.zst'
+        # Load the predefined splits from the dataset
+        data_train = (load_dataset(
+            'json',
+            data_files=train_data_files_pattern,
+            split='train',
+            num_proc=num_proc,
+            keep_in_memory=False)
+                      .filter(filter_fn))
+        data_val = (load_dataset(
+            'json',
+            data_files=val_data_files_pattern,
+            split='validation',
+            num_proc=num_proc,
+            keep_in_memory=False)
+                    .filter(filter_fn))
+
+        # Concatenate the training and validation datasets
+        train_val_dataset = {
+            'train': data_train,
+            'val': data_val
+        }
+
+    # Ensure your save path exists
     os.makedirs(save_data_path, exist_ok=True)
 
 
@@ -88,11 +152,11 @@ if __name__ == "__main__":
         text = example['text']
         text.strip()
         tokens = enc.encode(text, bos=True, eos=False)
-        return {"ids": tokens, "len": len(tokens)}
+        return {'ids': tokens, 'len': len(tokens)}
 
 
     # tokenize the data
-    tokenized_data = train_val_dataset.map(process_dataset, remove_columns=["text"], num_proc=num_proc)
+    tokenized_data = train_val_dataset.map(process_dataset, remove_columns=['text'], num_proc=num_proc)
 
     # save the tokenized data
     # Iterate over each split in the tokenized dataset

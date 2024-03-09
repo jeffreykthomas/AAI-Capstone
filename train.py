@@ -98,7 +98,7 @@ iter_batches = partial(
     max_seq_len=max_length,
     vocab_size=vocab_size,
     device=device_type,
-    num_workers=16,
+    num_workers=0,
 )
 
 
