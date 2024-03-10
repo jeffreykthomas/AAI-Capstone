@@ -28,7 +28,7 @@ compile_model = True  # Whether to compile the model
 # Training Configuration
 warmup_steps = 1000
 accumulation_steps = 32  # Number of steps to accumulate gradients
-num_global_steps = 100000  # Number of global steps
+num_global_steps = 75000  # Number of global steps
 min_lr = 3e-5
 learning_rate = 3e-4
 lr_decay_iters = num_global_steps
@@ -189,7 +189,9 @@ def run_training():
                         'global_step': global_step
                     }
                     print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
-                    torch.save(checkpoint, os.path.join(output_dir, 'best_chat_llama_model.pt'))
+                    # save the model, new file for every 1000 steps
+                    rounded_global_step = global_step // 1000 * 1000 + 1
+                    torch.save(checkpoint, os.path.join(output_dir, f'model_step_{rounded_global_step}.pt'))
 
         model.train()
 

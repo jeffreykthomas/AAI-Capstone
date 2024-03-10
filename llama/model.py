@@ -32,7 +32,8 @@ class RMSNorm(torch.nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        norm = x.pow(2).mean(-1, keepdim=True)
+        return x * torch.rsqrt(norm + self.eps)
 
     def forward(self, x):
         output = self._norm(x.float()).type_as(x)
@@ -57,42 +58,42 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
+    xqry: torch.Tensor,
+    xkey: torch.Tensor,
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-    # reshape xq and xk to match the complex representation
-    xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
-    xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
+    # reshape xq (query) and xk (key) to match the complex representation
+    xqry_r, xqry_i = xqry.float().reshape(xqry.shape[:-1] + (-1, 2)).unbind(-1)
+    xkey_r, xkey_i = xkey.float().reshape(xkey.shape[:-1] + (-1, 2)).unbind(-1)
 
     # reshape freqs_cos and freqs_sin for broadcasting
-    freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
-    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+    freqs_cos = reshape_for_broadcast(freqs_cos, xqry_r)
+    freqs_sin = reshape_for_broadcast(freqs_sin, xqry_r)
 
     # apply rotation using real numbers
-    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
-    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
-    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
-    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+    xq_out_r = xqry_r * freqs_cos - xqry_i * freqs_sin
+    xq_out_i = xqry_r * freqs_sin + xqry_i * freqs_cos
+    xk_out_r = xkey_r * freqs_cos - xkey_i * freqs_sin
+    xk_out_i = xkey_r * freqs_sin + xkey_i * freqs_cos
 
     # flatten last two dimensions
     xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1).flatten(3)
     xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1).flatten(3)
 
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    return xq_out.type_as(xqry), xk_out.type_as(xkey)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
+    batch_size, seq_len, n_kv_heads, head_dim = x.shape
     if n_rep == 1:
         return x
     return (
         x[:, :, :, None, :]
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+        .expand(batch_size, seq_len, n_kv_heads, n_rep, head_dim)
+        .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)
     )
 
 
@@ -114,7 +115,7 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
 
-        # use flash attention or a manual implementation?
+        # use flash attention or a manual implementation
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
