@@ -16,11 +16,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import get_cosine_schedule_with_warmup
 
 # Model Configuration
-vocab_size = 32000  # Vocabulary size of the pre-trained SentencePiece model
-max_length = 1024  # Maximum sequence length
+d_model = 2048  # Dimension of the transformer model
 num_layers = 16  # Number of transformer layers
 num_heads = 16  # Number of attention heads
-d_model = 2048  # Dimension of the transformer model
+n_kv_heads = 16  # Number of key-value heads
+vocab_size = 32000  # Vocabulary size of the pre-trained SentencePiece model
+multiple_of = 32  # Multiple of the model dimension
+norm_eps = 1e-5  # Epsilon value for layer normalization
+max_length = 1024  # Maximum sequence length
 dropout = 0.1  # Dropout rate
 micro_batch_size = 8  # Batch size per GPU
 compile_model = True  # Whether to compile the model
@@ -52,10 +55,10 @@ model_config = llama_model.TransformerConfig()
 model_config.model_dimension = d_model
 model_config.num_layers = num_layers
 model_config.num_attention_heads = num_heads
-model_config.num_kv_heads = num_heads
+model_config.num_kv_heads = n_kv_heads
 model_config.vocabulary_size = vocab_size
-model_config.multiple_of = 32
-model_config.norm_eps = 1e-5
+model_config.multiple_of = multiple_of
+model_config.norm_eps = norm_eps
 model_config.max_seq_len = max_length
 model_config.dropout = dropout
 
