@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from galore_torch import GaLoreAdamW8bit
 
 
 @dataclass
@@ -275,7 +276,8 @@ class Transformer(nn.Module):
 
         return logits
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, galore, rank, update_proj_gap, scale, proj_type):
+        
         # start with all the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -284,20 +286,47 @@ class Transformer(nn.Module):
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+
+        if galore:
+            galore_params = []
+            target_modules_list = ["attn", "mlp"]
+            for module_name, module in self.named_modules():
+                # make parameters with "rank" to a single group, if param_name has "mlp" or "attn"
+                if not isinstance(module, nn.Linear):
+                    continue
+
+                if not any(target_key in module_name for target_key in target_modules_list):
+                    continue
+                print('enable GaLore for weights in module: ', module_name)
+                galore_params.append(module.weight)
+
+            id_galore_params = [id(p) for p in galore_params]
+            regular_params = [p for p in self.parameters() if id(p) not in id_galore_params]
+            optim_groups = [
+                {'params': regular_params},
+                {'params': galore_params, 'rank': rank, 'update_proj_gap': update_proj_gap, 'scale': scale, 'proj_type': proj_type}]
+            
+            num_reg_params = sum(p.numel() for p in regular_params)
+            num_galore_params = sum(p.numel() for p in galore_params)
+            print(f"num regular parameter tensors: {len(regular_params)}, with {num_reg_params:,} parameters")
+            print(f"num galore parameter tensors: {len(galore_params)}, with {num_galore_params:,} parameters")
+            optimizer = GaLoreAdamW8bit(optim_groups, lr = learning_rate, betas = betas, weight_decay = weight_decay)
+            print("Using GaLoreAdamW8bit")
+        else:
+            optim_groups = [ 
+                {'params': decay_params, 'weight_decay': weight_decay},
+                {'params': nodecay_params, 'weight_decay': 0.0}]
+            
+            num_decay_params = sum(p.numel() for p in decay_params)
+            num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+            # Create AdamW optimizer and use the fused version if it is available
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
 
         return optimizer
 

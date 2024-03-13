@@ -1,3 +1,6 @@
+# from project root run: python train.py
+# Distributed training: torchrun --standalone --nproc_per_node=2 train.py 
+
 import os
 from functools import partial
 import time
@@ -25,8 +28,8 @@ multiple_of = 32  # Multiple of the model dimension
 norm_eps = 1e-5  # Epsilon value for layer normalization
 max_length = 1024  # Maximum sequence length
 dropout = 0.1  # Dropout rate
-micro_batch_size = 8  # Batch size per GPU
-compile_model = True  # Whether to compile the model
+micro_batch_size = 1  # Batch size per GPU
+compile_model = False  # Whether to compile the model
 
 # Training Configuration
 warmup_steps = 1000
@@ -43,12 +46,19 @@ eval_steps = 50  # Number of steps between evaluation of the model
 eval_iters = 100  # Number of iterations to evaluate the model
 log_interval = 4  # Number of steps between logging
 
+# Galore params
+galore = True
+rank = 128
+update_proj_gap = 50
+scale = 1.0
+proj_type = "std"
+
 # wandb logging
 wandb_project = 'Llama-Health-Chatbot'
 wandb_run_name = 'run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-data_folder = '/data/datasets/openwebtext'
-output_dir = '/data/models/llama_health'
+data_folder = 'data/datasets/openwebtext'
+output_dir = 'data/models/llama_health'
 
 # Initialize the model
 model_config = llama_model.TransformerConfig()
@@ -117,8 +127,8 @@ def run_training():
         unoptimized_model = model
         model = torch.compile(model)
 
-    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device.type)
-
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device.type, galore, rank, update_proj_gap, scale, proj_type)
+    
     # Print number of parameters
     if master_process:
         print(f'Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
