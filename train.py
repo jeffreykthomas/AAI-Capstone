@@ -21,8 +21,8 @@ from transformers import get_cosine_schedule_with_warmup
 # Model Configuration
 d_model = 2048  # Dimension of the transformer model
 num_layers = 16  # Number of transformer layers
-num_heads = 16  # Number of attention heads
-n_kv_heads = 16  # Number of key-value heads
+num_heads = 32  # Number of attention heads
+n_kv_heads = 32  # Number of key-value heads
 vocab_size = 32000  # Vocabulary size of the pre-trained SentencePiece model
 multiple_of = 32  # Multiple of the model dimension
 norm_eps = 1e-5  # Epsilon value for layer normalization
@@ -49,8 +49,8 @@ log_interval = 4  # Number of steps between logging
 # Galore params
 galore = True
 rank = 128
-update_proj_gap = 50
-scale = 1.0
+update_proj_gap = 200
+scale = 0.25
 proj_type = "std"
 
 # wandb logging
@@ -58,7 +58,7 @@ wandb_project = 'Llama-Health-Chatbot'
 wandb_run_name = 'run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
 data_folder = 'data/datasets/openwebtext'
-output_dir = 'data/models/llama_health'
+output_dir = 'data/models/llama_health_galore'
 
 # Initialize the model
 model_config = llama_model.TransformerConfig()
