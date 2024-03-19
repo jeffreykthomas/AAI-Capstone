@@ -1,11 +1,8 @@
 import random
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
-import os
 import tqdm
 import pandas as pd
-
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 prompts = [
 	"Output only an example of a chat message sent by someone suffering from depression and nothing else. Format your output in quotation marks.",
@@ -52,8 +49,8 @@ prompts = [
 chat_models = [
 	'meta-llama/Llama-2-7b-chat-hf',
 	'meta-llama/Llama-2-13b-chat-hf',
-	'Qwen/Qwen1.5-0.5B-Chat',
-	'mistralai/Mistral-7B-Instruct-v0.2']
+	'mistralai/Mistral-7B-Instruct-v0.2',
+	'Qwen/Qwen1.5-0.5B-Chat']
 
 
 num_iterations = 300
@@ -63,12 +60,16 @@ num_responses_per_prompt = 3
 def generate_user_messages(model_name, num_iterations, num_responses_per_prompt, prompts, batch_size=1):
 	model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
 	tokenizer = AutoTokenizer.from_pretrained(model_name)
+	tokenizer.pad_token = tokenizer.eos_token
 	device = 'cuda' if torch.cuda.is_available() else 'cpu'
-	model = model.to(device)
 	all_outputs = []
 
-	for batch_start in tqdm.tqdm(range(0, num_iterations, batch_size)):
-		batch_prompts = prompts[batch_start:batch_start + batch_size]
+	for _ in tqdm.tqdm(range(0, num_iterations, batch_size)):
+		# choose a random batch of prompts
+		batch_prompts = random.sample(prompts, batch_size)
+		if not batch_prompts:
+			print("All prompts have been processed.")
+			continue
 		input = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True).to(device)
 
 		# Randomly select temp, top_k, and top_p
@@ -92,14 +93,15 @@ def generate_user_messages(model_name, num_iterations, num_responses_per_prompt,
 			all_outputs.append(response)
 
 	all_data = pd.DataFrame(all_outputs, columns=["text"])
-	all_data['model'] = model_name
-	all_data.to_csv(f'{model_name}_responses.csv', index=False, encoding='utf-8')
+	precise_model_name = model_name.split('/')[1]
+	all_data['model'] = precise_model_name
+	all_data.to_csv(f'{precise_model_name}_responses.csv', index=False, encoding='utf-8')
 
 	print("All done!")
 
 
-def clear_user_messages(output_file):
-	df = pd.read_csv(output_file)
+def clean_user_messages(file):
+	df = pd.read_csv(file)
 	# Extract the chat messages from the text column
 	df['chat1'] = df['text'].str.extract(r'\"(.*?)\"')
 	df['chat2'] = df['text'].str.extract(r'\"(.*?)$')
@@ -114,19 +116,19 @@ def clear_user_messages(output_file):
 	df = df.dropna(subset=['final_chat'])
 
 	# Save the cleaned data to a new file
-	df.to_csv(f'cleaned_{output_file}', index=False, encoding='utf-8')
+	df.to_csv(f'cleaned_{file}', index=False, encoding='utf-8')
 
 
 def generate_expert_messages(model_name, input_file):
 	model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
 	tokenizer = AutoTokenizer.from_pretrained(model_name)
 	device = 'cuda' if torch.cuda.is_available() else 'cpu'
-	model = model.to(device)
+	# Load the cleaned user messages
 	df = pd.read_csv(input_file)
 	all_outputs = []
 	expert_prompt = '''
 	<s>[INST] <<SYS>> As an expert in mental health, respond with advice to the user message
-	<</SYS>>
+	<</SYS>> 
 	'''
 	for i, prompt in enumerate(df['final_chat']):
 		print(f"Prompt {i + 1}/{len(df)}: {prompt}")
@@ -140,7 +142,7 @@ def generate_expert_messages(model_name, input_file):
 
 		output = model.generate(
 			**input,
-			max_length=150,
+			max_length=512,
 			num_return_sequences=1,
 			temperature=temperature,
 			do_sample=True,
@@ -154,6 +156,18 @@ def generate_expert_messages(model_name, input_file):
 
 	all_data = pd.DataFrame(all_outputs, columns=["text"])
 	all_data['model'] = model_name
-	all_data.to_csv(f'{model_name}_responses.csv', index=False, encoding='utf-8')
+	all_data.to_csv(f'{model_name}_responses_w_expert.csv', index=False, encoding='utf-8')
 
 	print("All done!")
+
+
+if __name__ == '__main__':
+	for model in chat_models:
+		if model == 'meta-llama/Llama-2-7b-chat-hf':
+			precise_model_name = model.split('/')[1]
+			generate_expert_messages(model, f'cleaned_{precise_model_name}_responses.csv')
+		else:
+			generate_user_messages(model, num_iterations, num_responses_per_prompt, prompts, batch_size=4)
+			precise_model_name = model.split('/')[1]
+			clean_user_messages(f'{precise_model_name}_responses.csv')
+			generate_expert_messages(model, f'cleaned_{precise_model_name}_responses.csv')
