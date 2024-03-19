@@ -277,21 +277,12 @@ class Transformer(nn.Module):
         return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, galore, rank, update_proj_gap, scale, proj_type):
-        
-        # start with all the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
 
         if galore:
             galore_params = []
-            target_modules_list = ["attn", "mlp"]
+            target_modules_list = ['attention', 'feed_forward']
             for module_name, module in self.named_modules():
-                # make parameters with "rank" to a single group, if param_name has "mlp" or "attn"
+                # make parameters with "rank" to a single group, if param_name has "attention" or "feed_forward"
                 if not isinstance(module, nn.Linear):
                     continue
 
@@ -305,14 +296,25 @@ class Transformer(nn.Module):
             optim_groups = [
                 {'params': regular_params},
                 {'params': galore_params, 'rank': rank, 'update_proj_gap': update_proj_gap, 'scale': scale, 'proj_type': proj_type}]
-            
+
+    
             num_reg_params = sum(p.numel() for p in regular_params)
             num_galore_params = sum(p.numel() for p in galore_params)
             print(f"num regular parameter tensors: {len(regular_params)}, with {num_reg_params:,} parameters")
             print(f"num galore parameter tensors: {len(galore_params)}, with {num_galore_params:,} parameters")
             optimizer = GaLoreAdamW8bit(optim_groups, lr = learning_rate, betas = betas, weight_decay = weight_decay)
             print("Using GaLoreAdamW8bit")
+            
         else:
+            # start with all the candidate parameters
+            param_dict = {pn: p for pn, p in self.named_parameters()}
+            # filter out those that do not require grad
+            param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+            # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+            # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
             optim_groups = [ 
                 {'params': decay_params, 'weight_decay': weight_decay},
                 {'params': nodecay_params, 'weight_decay': 0.0}]
