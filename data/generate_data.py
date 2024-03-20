@@ -48,16 +48,24 @@ prompts = [
 ]
 chat_models = [
     'meta-llama/Llama-2-7b-chat-hf',
+    'Qwen/Qwen1.5-0.5B-Chat',
     'meta-llama/Llama-2-13b-chat-hf',
-    'mistralai/Mistral-7B-Instruct-v0.2',
-    'Qwen/Qwen1.5-0.5B-Chat']
+    'mistralai/Mistral-7B-Instruct-v0.2'
+    ]
 
 num_iterations = 300
 num_responses_per_prompt = 3
 
+bnb_config = {
+    'load_in_4bit': True,
+    'bnb_4bit_compute_type': torch.bfloat16,
+    'bnb_4bit_quant_type': 'nf4',
+    'bnb_4bit_use_double_quant': True
+}
+
 
 def generate_user_messages(model_name, num_iterations, num_responses_per_prompt, prompts, batch_size=1):
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', quantization_config=bnb_config)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -119,7 +127,7 @@ def clean_user_messages(file):
 
 
 def generate_expert_messages(model_name, input_file, batch_size=4):
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', quantization_config=bnb_config)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'right'
