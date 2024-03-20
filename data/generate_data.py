@@ -164,8 +164,7 @@ def generate_expert_messages(model_name, input_file, batch_size=4):
         all_outputs.extend(batch_responses)
 
     all_data = pd.DataFrame(all_outputs, columns=["text"])
-    all_data['model'] = model_name
-    all_data.to_csv(f'{model_name}_responses_w_expert.csv', index=False, encoding='utf-8')
+    all_data.to_csv(f'{model_name.split("/")[1]}_responses_w_expert.csv', index=False, encoding='utf-8')
 
     print("All done!")
 
