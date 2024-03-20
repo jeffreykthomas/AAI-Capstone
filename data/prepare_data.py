@@ -18,10 +18,11 @@ enc = Tokenizer('llama/models/tokenizer.model')
 dataset = 'openwebtext'
 
 if dataset == 'openwebtext':
-    save_data_path = '/data/datasets/openwebtext'
+    save_data_path = 'data/datasets/openwebtext'
 else:
-    save_data_path = '/data/datasets/slim-pajama-tokenized'
-
+    save_data_path = 'data/datasets/slim-pajama-tokenized'
+    
+'''
 cache_dir = os.environ.get('HF_HOME', None)
 if cache_dir is None:
     print('Cache directory is not specified. Please set the HF_HOME environment variable or specify a cache_dir.')
@@ -43,7 +44,7 @@ if not os.access(cache_dir, os.R_OK):
     sys.exit(1)
 
 print(f'Using cache directory: {cache_dir}')
-
+'''
 
 class PretokDataset(torch.utils.data.IterableDataset):
     '''Loads pretokenized examples from disk and yields them as PyTorch tensors.'''
