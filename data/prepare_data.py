@@ -15,12 +15,7 @@ import torch.distributed as dist
 num_proc = 32
 enc = Tokenizer('llama/models/tokenizer.model')
 
-dataset = 'openwebtext'
-
-if dataset == 'openwebtext':
-    save_data_path = '/data/datasets/openwebtext'
-else:
-    save_data_path = '/data/datasets/slim-pajama-tokenized'
+save_data_path = '/data/datasets/openwebtext'
 
 cache_dir = os.environ.get('HF_HOME', None)
 if cache_dir is None:
@@ -112,37 +107,9 @@ def filter_fn(example):
 
 
 if __name__ == '__main__':
-    if dataset == 'openwebtext':
-        data = load_dataset('openwebtext', num_proc=num_proc)
-        train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
-        train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
-    else:
-        # Define a list of set names to exclude
-        excluded_sets = ['RedPajamaGithub']
-
-        train_data_files_pattern = '/data/datasets/SlimPajama-627B/train/chunk*/**/*.jsonl.zst'
-        val_data_files_pattern = '/data/datasets/SlimPajama-627B/validation/chunk*/**/*.jsonl.zst'
-        # Load the predefined splits from the dataset
-        data_train = (load_dataset(
-            'json',
-            data_files=train_data_files_pattern,
-            split='train',
-            num_proc=num_proc,
-            keep_in_memory=False)
-                      .filter(filter_fn))
-        data_val = (load_dataset(
-            'json',
-            data_files=val_data_files_pattern,
-            split='validation',
-            num_proc=num_proc,
-            keep_in_memory=False)
-                    .filter(filter_fn))
-
-        # Concatenate the training and validation datasets
-        train_val_dataset = {
-            'train': data_train,
-            'val': data_val
-        }
+    data = load_dataset('openwebtext', num_proc=num_proc)
+    train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
+    train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
 
     # Ensure your save path exists
     os.makedirs(save_data_path, exist_ok=True)
