@@ -2,7 +2,7 @@
 # from project root run: python -m data.prepare_data
 
 import os
-import sys
+import argparse
 import random
 import glob
 from tqdm import tqdm
@@ -12,7 +12,10 @@ from datasets import load_dataset
 import torch
 import torch.distributed as dist
 
-num_proc = 32
+argparser = argparse.ArgumentParser()
+argparser.add_argument('--num_proc', type=int, default=32)
+args = argparser.parse_args()
+
 enc = Tokenizer('llama/models/tokenizer.model')
 
 save_data_path = '/data/datasets/openwebtext'
@@ -104,13 +107,9 @@ class Task:
 
 
 if __name__ == '__main__':
-    data = load_dataset('openwebtext', num_proc=num_proc)
+    data = load_dataset('openwebtext', num_proc=args.num_proc)
     train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
     train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
-
-    # Ensure your save path exists
-    os.makedirs(save_data_path, exist_ok=True)
-
 
     def process_dataset(example):
         text = example['text']
@@ -118,9 +117,11 @@ if __name__ == '__main__':
         tokens = enc.encode(text, bos=True, eos=False)
         return {'ids': tokens, 'len': len(tokens)}
 
-
     # tokenize the data
-    tokenized_data = train_val_dataset.map(process_dataset, remove_columns=['text'], num_proc=num_proc)
+    tokenized_data = train_val_dataset.map(process_dataset, remove_columns=['text'], num_proc=args.num_proc)
+
+    # Ensure your save path exists
+    os.makedirs(save_data_path, exist_ok=True)
 
     # save the tokenized data
     # Iterate over each split in the tokenized dataset

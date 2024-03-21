@@ -58,7 +58,7 @@ num_responses_per_prompt = 3
 
 bnb_config = {
     'load_in_4bit': True,
-    'bnb_4bit_compute_type': torch.bfloat16,
+    'bnb_4bit_compute_dtype': torch.bfloat16,
     'bnb_4bit_quant_type': 'nf4',
     'bnb_4bit_use_double_quant': True
 }
@@ -126,7 +126,7 @@ def clean_user_messages(file):
     df.to_csv(f'cleaned_{file}', index=False, encoding='utf-8')
 
 
-def generate_expert_messages(model_name, input_file, batch_size=4):
+def generate_expert_messages(model_name, input_file, batch_size=16):
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', quantization_config=bnb_config)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
