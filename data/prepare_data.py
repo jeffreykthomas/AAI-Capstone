@@ -17,6 +17,7 @@ enc = Tokenizer('llama/models/tokenizer.model')
 
 save_data_path = '/data/datasets/openwebtext'
 
+'''
 cache_dir = os.environ.get('HF_HOME', None)
 if cache_dir is None:
     print('Cache directory is not specified. Please set the HF_HOME environment variable or specify a cache_dir.')
@@ -38,6 +39,7 @@ if not os.access(cache_dir, os.R_OK):
     sys.exit(1)
 
 print(f'Using cache directory: {cache_dir}')
+'''
 
 
 class PretokDataset(torch.utils.data.IterableDataset):
@@ -99,11 +101,6 @@ class Task:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             yield x, y
-
-
-# Function to filter out unwanted set names
-def filter_fn(example):
-    return example['meta']['redpajama_set_name'] not in excluded_sets
 
 
 if __name__ == '__main__':

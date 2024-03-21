@@ -145,7 +145,7 @@ def write_model(
         # Not sharded
         # (The sharded implementation would also work, but this is simpler.)
         if llama_version == 0:
-            ckpt_path = '/data/models/llama_health/model_step_41001.pt'
+            ckpt_path = '/data/models/llama_health/model_step_74001.pt'
             print(f"Sys path: {sys.path}")
             checkpoint = torch.load(ckpt_path, map_location='cpu')
             loaded = checkpoint['model']
