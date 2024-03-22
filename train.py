@@ -19,6 +19,7 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from transformers import get_cosine_schedule_with_warmup
+from peft_pretraining import training_utils
 from galore_torch import GaLoreAdamW8bit
 import bitsandbytes as bnb
 
@@ -142,54 +143,10 @@ def run_training():
         prefix = '_orig_mod.' if compile_model else ''
         model._ddp_params_and_buffers_to_ignore = {f'{prefix}freqs_cis'}
         model = DDP(model, device_ids=[ddp_local_rank])
-        
+
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device.type, galore, rank, update_proj_gap, scale, proj_type, layer_wise)
     if not layer_wise:
-        optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device.type, galore, rank, update_proj_gap, scale, proj_type)
         scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_global_steps)
-        
-    else:
-        galore_params = []
-        target_modules_list = ['attention', 'feed_forward']
-        for module_name, module in model.named_modules():
-            # make parameters with "rank" to a single group, if param_name has "attention" or "feed_forward"
-            if not isinstance(module, nn.Linear):
-                continue
-
-            if not any(target_key in module_name for target_key in target_modules_list):
-                continue
-            print('enable GaLore for weights in module: ', module_name)
-            galore_params.append(module.weight)
-
-        id_galore_params = [id(p) for p in galore_params]
-        regular_params = [p for p in model.parameters() if id(p) not in id_galore_params]
-        optim_groups = [{'params': regular_params},
-                        {'params': galore_params, 'rank': rank, 'update_proj_gap': update_proj_gap, 'scale': scale, 'proj_type': proj_type}]
-        
-        optimizer_dict = {}
-        for p in model.parameters():
-            if p.requires_grad:
-                if id(p) in id_galore_params:
-                    optimizer_dict[p] = GaLoreAdamW8bit([{'params': [p], 'rank': rank, 'update_proj_gap': update_proj_gap * 2, 'scale': scale, 'proj_type': proj_type}], lr=learning_rate, weight_decay=weight_decay, betas = (beta1, beta2))
-                else:
-                    optimizer_dict[p] = bnb.optim.Adam8bit([p], lr=learning_rate, weight_decay=weight_decay, betas = (beta1, beta2))
-    
-        # get scheduler dict
-        scheduler_dict = {}
-        for p in model.parameters():
-            if p.requires_grad:
-                scheduler_dict[p] = get_cosine_schedule_with_warmup(optimizer_dict[p], num_warmup_steps=warmup_steps, num_training_steps=num_global_steps)
-        
-        def optimizer_hook(p):
-            if p.grad is None: 
-                return
-            optimizer_dict[p].step()
-            optimizer_dict[p].zero_grad()
-            scheduler_dict[p].step()
-
-        # Register the hook onto every parameter
-        for p in model.parameters():
-            if p.requires_grad:
-                p.register_post_accumulate_grad_hook(optimizer_hook)
 
 
     @torch.no_grad()
@@ -221,14 +178,22 @@ def run_training():
         # Validation loop
         if global_step % eval_steps == 0 and master_process:
             losses = estimate_loss()
+            print(losses)
             val_loss = losses['val']
             train_loss = losses['train']
+            
+            if not layer_wise:
+                lr = scheduler.get_last_lr()[0]
+            else:
+                #lr = list(optimizer_dict.values())[0].param_groups[0]["lr"]
+                lr = None
+                
             wandb.log(
                 {
                     'global_step': global_step,
                     'loss': train_loss,
                     'val_loss': val_loss,
-                    'lr': scheduler.get_last_lr()[0],
+                    'lr': lr,
                     'mfu': running_mfu * 100,
                 }
             )
@@ -267,19 +232,24 @@ def run_training():
                 # Normalize the loss
                 loss = loss / accumulation_steps
             X, y = next(train_batch_iter)
-            scaler.scale(loss).backward()
+            if not layer_wise:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
         if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-        # Perform optimization step
-        scaler.step(optimizer)
-        scaler.update()
+        if not layer_wise:
+            if grad_clip != 0.0:
+                scaler.unscale_(optimizer)
+            # Perform optimization step
+            scaler.step(optimizer)
+            scaler.update()
 
-        # Zero gradients
-        optimizer.zero_grad()
-        scheduler.step()
+            # Zero gradients
+            optimizer.zero_grad()
+            scheduler.step()
 
         t1 = time.time()
         dt = t1 - t0
@@ -290,15 +260,16 @@ def run_training():
             if local_iter_num >= 5:
                 mfu = raw_model.estimate_mfu(micro_batch_size * accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-            print(
-                f'\r{global_step + 1}/{num_global_steps} | '
-                f'loss {lossf:.4f} | '
-                f'lr {scheduler.get_last_lr()[0]:e} | '
-                f'{dt*1000:.2f}ms | '
-                f'mfu {running_mfu*100:.2f}%',
-                end='',
-                flush=True
-            )
+            if not layer_wise:
+                print(
+                    f'\r{global_step + 1}/{num_global_steps} | '
+                    f'loss {lossf:.4f} | '
+                    f'lr {scheduler.get_last_lr()[0]:e} | '
+                    f'{dt*1000:.2f}ms | '
+                    f'mfu {running_mfu*100:.2f}%',
+                    end='',
+                    flush=True
+                    )
 
         local_iter_num += 1
 
