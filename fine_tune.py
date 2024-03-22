@@ -1,9 +1,12 @@
+import os
+import argparse
+
 import pandas as pd
-import torch
 import wandb
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-import os
+
+from datetime import datetime
 import torch
 from transformers import (
     AutoConfig,
@@ -20,8 +23,10 @@ from trl import SFTTrainer
 import transformers
 from datasets import load_dataset
 
-data_folder = 'data/ubuntu/'
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument('--data_folder', type=str, default='/data/datasets/empathic_dialogues/')
 
+args = arg_parser.parse_args()
 
 class CustomDataset(Dataset):
     def __init__(self, input_encodings):
@@ -59,7 +64,7 @@ class PadCollate():
         return x_encodings
 
 
-model_name = 'jeffreykthomas/llama-mental-health'
+model_name = 'jeffreykthomas/llama-mental-health-base'
 
 # Set base model loading in 4-bits
 use_4bit = True
@@ -96,19 +101,17 @@ tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 tokenizer.pad_token_id = -1
 tokenizer.paddding_side = "right"
 
-wandb_project = 'aai-520-final-project'
-wandb_run_name = 'llama-2-7b-ubuntu-generation'
+wandb_project = 'Llama-Health-Chatbot'
+wandb_run_name = 'finetune-run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
 wandb.init(project=wandb_project, name=wandb_run_name)
 
 # Load the data
-train_texts = pd.read_csv(data_folder + 'train_dataset.csv')
-val_texts = pd.read_csv(data_folder + 'val_dataset.csv')
-test_texts = pd.read_csv(data_folder + 'test_dataset.csv')
+train_texts = pd.read_csv(args.data_folder + 'train_dataset.csv')
+val_texts = pd.read_csv(args.data_folder + 'val_dataset.csv')
 
-dataset = load_dataset('csv', data_files={'train': data_folder + 'train_dataset.csv',
-                                          'validation': data_folder + 'val_dataset.csv',
-                                          'test': data_folder + 'test_dataset.csv'})
+dataset = load_dataset('csv', data_files={'train': args.data_folder + 'train_dataset.csv',
+                                          'validation': args.data_folder + 'val_dataset.csv'})
 
 
 ppd = PadCollate(tokenizer.pad_token_id)
@@ -139,11 +142,10 @@ num_train_epochs = 3
 max_steps = -1
 bf16 = True
 fp16 = False
-per_device_train_batch_size = 2
-per_device_eval_batch_size = 2
-gradient_accumulation_steps = 8
+per_device_train_batch_size = 8
+per_device_eval_batch_size = 8
+gradient_accumulation_steps = 4
 max_grad_norm = 0.1
-# optim = "paged_adamw_32bit"
 optim = "adamw_torch"
 learning_rate = 2e-5
 lr_scheduler_type = "constant"
