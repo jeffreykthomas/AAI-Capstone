@@ -19,7 +19,6 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from transformers import get_cosine_schedule_with_warmup
-from peft_pretraining import training_utils
 from galore_torch import GaLoreAdamW8bit
 import bitsandbytes as bnb
 
