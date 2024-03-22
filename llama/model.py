@@ -277,10 +277,10 @@ class Transformer(nn.Module):
         return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, galore, rank, update_proj_gap, scale, proj_type):
-
         if galore:
             galore_params = []
             target_modules_list = ['attention', 'feed_forward']
+            
             for module_name, module in self.named_modules():
                 # make parameters with "rank" to a single group, if param_name has "attention" or "feed_forward"
                 if not isinstance(module, nn.Linear):
@@ -302,7 +302,7 @@ class Transformer(nn.Module):
             num_galore_params = sum(p.numel() for p in galore_params)
             print(f"num regular parameter tensors: {len(regular_params)}, with {num_reg_params:,} parameters")
             print(f"num galore parameter tensors: {len(galore_params)}, with {num_galore_params:,} parameters")
-            optimizer = GaLoreAdamW8bit(optim_groups, lr = learning_rate, betas = betas, weight_decay = weight_decay)
+            optimizer = GaLoreAdamW8bit(optim_groups, lr=learning_rate, betas=betas, weight_decay=weight_decay)
             print("Using GaLoreAdamW8bit")
             
         else:
