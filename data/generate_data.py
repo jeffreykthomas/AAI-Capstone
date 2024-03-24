@@ -48,9 +48,9 @@ prompts = [
 ]
 chat_models = [
     'meta-llama/Llama-2-7b-chat-hf',
-    'Qwen/Qwen1.5-0.5B-Chat',
     'meta-llama/Llama-2-13b-chat-hf',
-    'mistralai/Mistral-7B-Instruct-v0.2'
+    'mistralai/Mistral-7B-Instruct-v0.2',
+    'mistralai/Mixtral-8x7B-Instruct-v0.1'
     ]
 
 num_iterations = 300
@@ -126,7 +126,7 @@ def clean_user_messages(file):
     df.to_csv(f'cleaned_{file}', index=False, encoding='utf-8')
 
 
-def generate_expert_messages(model_name, input_file, batch_size=16):
+def generate_expert_messages(model_name, input_file, batch_size=8):
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', quantization_config=bnb_config)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
@@ -186,4 +186,4 @@ if __name__ == '__main__':
             generate_user_messages(model, num_iterations, num_responses_per_prompt, prompts, batch_size=4)
             precise_model_name = model.split('/')[1]
             clean_user_messages(f'{precise_model_name}_responses.csv')
-            generate_expert_messages(model, f'cleaned_{precise_model_name}_responses.csv')
+            generate_expert_messages(model, f'cleaned_{precise_model_name}_responses.csv', batch_size=4)

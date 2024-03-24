@@ -49,7 +49,7 @@ for split in dfs.items():
 	if split[0] == 'test':
 		continue
 
-	output_dir = 'data/empathetic_dialogues/'
+	output_dir = '/data/datasets/empathetic-dialogues/'
 	if not os.path.exists(output_dir):
 		os.makedirs(output_dir)
 	# Save the data

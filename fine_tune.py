@@ -24,9 +24,10 @@ import transformers
 from datasets import load_dataset
 
 arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument('--data_folder', type=str, default='/data/datasets/empathic_dialogues/')
+arg_parser.add_argument('--data_folder', type=str, default='/data/datasets/empathetic-dialogues/')
 
 args = arg_parser.parse_args()
+
 
 class CustomDataset(Dataset):
     def __init__(self, input_encodings):
@@ -98,8 +99,8 @@ model = prepare_model_for_kbit_training(model)
 
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-tokenizer.pad_token_id = -1
-tokenizer.paddding_side = "right"
+tokenizer.pad_token = "<pad>"
+tokenizer.padding_side = "right"
 
 wandb_project = 'Llama-Health-Chatbot'
 wandb_run_name = 'finetune-run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -135,8 +136,10 @@ peft_config = LoraConfig(
 
 model = get_peft_model(model, peft_config)
 
-output_dir = "./results"
+output_dir = "/data/models/llama-mental-health/fine-tuned-models"
 final_checkpoint_dir = os.path.join(output_dir, "final_checkpoint_3epochs")
+if not os.path.exists(final_checkpoint_dir):
+    os.makedirs(final_checkpoint_dir)
 
 num_train_epochs = 3
 max_steps = -1
