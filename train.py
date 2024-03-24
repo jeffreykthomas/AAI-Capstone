@@ -97,7 +97,8 @@ if ddp:
     torch.cuda.set_device(ddp_device)
     master_process = ddp_rank == 0
     seed_offset = ddp_rank
-    assert args.accumulation_steps % ddp_world_size == 0, 'accumulation_steps must be divisible by the number of processes'
+    assert args.accumulation_steps % ddp_world_size == 0, \
+        'accumulation_steps must be divisible by the number of processes'
     args.accumulation_steps //= ddp_world_size
 else:
     master_process = True

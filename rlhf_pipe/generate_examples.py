@@ -18,7 +18,7 @@ for idx, row in df_test.iterrows():
 	context = row['text']
 	input_ids = tokenizer(context, return_tensors='pt').input_ids
 	generated_text = model.generate(input_ids, max_length=256, num_return_sequences=3, pad_token_id=tokenizer.eos_token_id)
-	generated_text = tokenizer.batch_decode(generated_text, skip_special_tokens=True)[0]
+	generated_text = tokenizer.batch_decode(generated_text, skip_special_tokens=True)
 	generated_examples.append(generated_text)
 
 # Upload to firestore
