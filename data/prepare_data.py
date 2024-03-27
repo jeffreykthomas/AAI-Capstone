@@ -11,48 +11,26 @@ from llama.tokenizer import Tokenizer
 from datasets import load_dataset
 import torch
 import torch.distributed as dist
-
-argparser = argparse.ArgumentParser()
-argparser.add_argument('--num_proc', type=int, default=32)
-args = argparser.parse_args()
-
-enc = Tokenizer('llama/models/tokenizer.model')
-
-save_data_path = '/data/datasets/openwebtext'
-
-'''
-cache_dir = os.environ.get('HF_HOME', None)
-if cache_dir is None:
-    print('Cache directory is not specified. Please set the HF_HOME environment variable or specify a cache_dir.')
-    sys.exit(1)
-
-# Check if the directory exists
-if not os.path.exists(cache_dir):
-    print(f'Cache directory does not exist: {cache_dir}')
-    sys.exit(1)
-
-# Check if the directory is writable
-if not os.access(cache_dir, os.W_OK):
-    print(f'Cache directory is not writable: {cache_dir}')
-    sys.exit(1)
-
-# Check if the directory is readable
-if not os.access(cache_dir, os.R_OK):
-    print(f'Cache directory is not readable: {cache_dir}')
-    sys.exit(1)
-
-print(f'Using cache directory: {cache_dir}')
-'''
+import torch.nn.functional as F
 
 
+# Create a custom PyTorch Dataset for loading the pretokenized data
 class PretokDataset(torch.utils.data.IterableDataset):
     '''Loads pretokenized examples from disk and yields them as PyTorch tensors.'''
 
-    def __init__(self, split, max_seq_len, vocab_size):
+    def __init__(self, split, max_seq_len, vocab_size, dataset):
         super().__init__()
         self.split = split
         self.max_seq_len = max_seq_len
         self.vocab_size = vocab_size
+        self.dataset = dataset
+
+        if self.dataset == 'openwebtext':
+            self.save_data_path = '/data/datasets/openwebtext'
+        elif self.dataset == 'dialogues':
+            self.save_data_path = '/data/datasets/dialogues'
+        elif self.dataset == 'mental_health_dialogues':
+            self.save_data_path = '/data/datasets/mental_health_dialogues'
 
     def __iter__(self):
         # get worker info within a DataLoader
@@ -66,7 +44,7 @@ class PretokDataset(torch.utils.data.IterableDataset):
         print(f'\nRank {rank}, Worker {worker_id}: Created a pre-tokenized Dataset with rng seed {seed}')
 
         # the .bin files are right along the .json files
-        bin_dir = save_data_path
+        bin_dir = self.save_data_path
         shard_filenames = sorted(glob.glob(os.path.join(bin_dir, '*.bin')))
 
         # train/val split. train.bin for train, val.bin for val
@@ -89,6 +67,11 @@ class PretokDataset(torch.utils.data.IterableDataset):
                     chunk = torch.from_numpy((m[start:end]).astype(np.int64))
                     x = chunk[:-1]
                     y = chunk[1:]
+                    pad_length = self.max_seq_len - len(x)
+                    pad_token_id = 2
+                    if pad_length > 0:
+                        x = F.pad(x, (0, pad_length), value=pad_token_id)
+                        y = F.pad(y, (0, pad_length), value=pad_token_id)
                     yield x, y
 
 
@@ -107,25 +90,67 @@ class Task:
 
 
 if __name__ == '__main__':
-    data = load_dataset('openwebtext', num_proc=args.num_proc)
-    train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
-    train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument('--num_proc', type=int, default=32)
+    argparser.add_argument('--dataset', type=str, default='openwebtext', help='openwebtext or empathetic_dialogues')
+    args = argparser.parse_args()
+
+    enc = Tokenizer('llama/models/tokenizer.model')
+
+    # Save the tokenized data to this directory
+    if args.dataset == 'openwebtext':
+        save_data_path = '/data/datasets/openwebtext'
+    elif args.dataset == 'dialogues':
+        save_data_path = '/data/datasets/dialogues'
+    elif args.dataset == 'mental_health_dialogues':
+        save_data_path = '/data/datasets/mental_health_dialogues'
+    else:
+        raise ValueError(f'Unknown dataset: {args.dataset}')
+
+    if args.dataset == 'openwebtext':
+        data = load_dataset('openwebtext', num_proc=args.num_proc)
+        train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
+        train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
+    elif args.dataset == 'dialogues':
+        data = load_dataset('csv', data_files={
+            'train': '/data/datasets/dialogues/train_dataset.csv',
+            'val': '/data/datasets/dialogues/val_dataset.csv',
+        }, num_proc=args.num_proc)
+        train_val_dataset = data
+    elif args.dataset == 'mental_health_dialogues':
+        data = load_dataset('csv', data_files={
+            'train': '/data/datasets/mental_health_dialogues/train_dataset.csv',
+            'val': '/data/datasets/mental_health_dialogues/val_dataset.csv',
+        }, num_proc=args.num_proc)
+        train_val_dataset = data
+    else:
+        raise ValueError(f'Unknown dataset: {args.dataset}')
 
     def process_dataset(example):
+        if example is None or example['text'] is None:
+            print('Skipping example with None text')
+            return {'ids': [], 'len': 0}
         text = example['text']
-        text.strip()
+        text = text.strip()
         tokens = enc.encode(text, bos=True, eos=False)
         return {'ids': tokens, 'len': len(tokens)}
+
+
+    def filter_empty_entries(example):
+        # Keep the example only if 'len' is greater than 0
+        return example['len'] > 0
 
     # tokenize the data
     tokenized_data = train_val_dataset.map(process_dataset, remove_columns=['text'], num_proc=args.num_proc)
 
+    # Filter out any empty entries
+    filtered_data = tokenized_data.filter(filter_empty_entries)
     # Ensure your save path exists
     os.makedirs(save_data_path, exist_ok=True)
 
     # save the tokenized data
     # Iterate over each split in the tokenized dataset
-    for split, dataset in tokenized_data.items():
+    for split, dataset in filtered_data.items():
         # Calculate the total length of all tokenized sequences in the dataset
         total_length = np.sum(dataset['len'], dtype=np.uint64)
         filename = os.path.join(save_data_path, f'{split}.bin')
@@ -137,7 +162,7 @@ if __name__ == '__main__':
         # Initialize the start index for writing to the memory-mapped array
         write_position = 0
         # The number of batches to divide the dataset into for processing
-        total_batches = 1024
+        total_batches = 1024 if len(dataset) > 1024 else len(dataset)
 
         # Iterate over each batch, showing progress with tqdm
         for batch_index in tqdm(range(total_batches), desc=f'Writing to {filename}'):
