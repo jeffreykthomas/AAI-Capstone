@@ -53,6 +53,7 @@ chat_models = [
     'mistralai/Mixtral-8x7B-Instruct-v0.1'
     ]
 
+output_dir = 'data/generated_data'
 num_iterations = 300
 num_responses_per_prompt = 3
 
@@ -102,7 +103,7 @@ def generate_user_messages(model_name, num_iterations, num_responses_per_prompt,
     all_data = pd.DataFrame(all_outputs, columns=["text"])
     precise_model_name = model_name.split('/')[1]
     all_data['model'] = precise_model_name
-    all_data.to_csv(f'{precise_model_name}_responses.csv', index=False, encoding='utf-8')
+    all_data.to_csv(f'{output_dir}/{precise_model_name}_responses.csv', index=False, encoding='utf-8')
 
     print("All done!")
 
@@ -123,7 +124,7 @@ def clean_user_messages(file):
     df = df.dropna(subset=['final_chat'])
 
     # Save the cleaned data to a new file
-    df.to_csv(f'cleaned_{file}', index=False, encoding='utf-8')
+    df.to_csv(f'{output_dir}/cleaned_{file}', index=False, encoding='utf-8')
 
 
 def generate_expert_messages(model_name, input_file, batch_size=8):
@@ -172,7 +173,7 @@ def generate_expert_messages(model_name, input_file, batch_size=8):
         all_outputs.extend(batch_responses)
 
     all_data = pd.DataFrame(all_outputs, columns=["text"])
-    all_data.to_csv(f'{model_name.split("/")[1]}_responses_w_expert.csv', index=False, encoding='utf-8')
+    all_data.to_csv(f'{output_dir}/{model_name.split("/")[1]}_responses_w_expert.csv', index=False, encoding='utf-8')
 
     print("All done!")
 
