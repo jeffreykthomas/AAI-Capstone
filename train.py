@@ -1,6 +1,15 @@
 # from project root run: python train.py
 # Distributed training: torchrun --standalone --nproc_per_node=2 train.py
 # Using Galore: torchrun --standalone --nproc_per_node=2 train.py --use_galore
+# Fine-tuning model on empathetic dialogues:
+# torchrun --standalone --nproc_per_node=2 train.py /
+# --use_galore --dataset empathetic_dialogues --output_dir /data/models/llama_empathetic_dialogues /
+# --wandb_run_nam empathetic-dialogues-run --dropout 0.4 /
+# --warmup_steps 500 --num_global_steps 1000 --min_lr 3e-5 --learning_rate 5e-5 /
+# --lr_decay_iters 1000 --grad_clip 1.0 --weight_decay 0.01 --beta1 0.9 --beta2 0.95
+# --eval_steps 20 --eval_iters 100 --log_interval 10
+
+
 # Max on 2 A6000 GPUs using DDP: torchrun --standalone --nproc_per_node=2 train.py --use_galore -num_layers 28
 
 import os
@@ -24,10 +33,12 @@ from transformers import get_cosine_schedule_with_warmup
 args_parser = argparse.ArgumentParser()
 
 # Data Configuration
-args_parser.add_argument('--data_folder', type=str, default='/data/datasets/openwebtext')
+args_parser.add_argument('--dataset', type=str, default='openwebtext')
+args_parser.add_argument('--load_pretrained', type=bool, default=False)
+args_parser.add_argument('--pretrained_path', type=str, default=None)
 args_parser.add_argument('--output_dir', type=str, default='/data/models/llama_health_galore')
 args_parser.add_argument('--wandb_project', type=str, default='Llama-Health-Chatbot')
-args_parser.add_argument('--wandb_run_name', type=str, default='run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+args_parser.add_argument('--wandb_run_name', type=str, default='run')
 
 # Model Configuration
 args_parser.add_argument('--d_model', type=int, default=2048)  # Dimension of the transformer model
@@ -46,7 +57,6 @@ args_parser.add_argument('--compile_model', type=bool, default=True)  # Whether 
 args_parser.add_argument('--warmup_steps', type=int, default=1000)
 args_parser.add_argument('--accumulation_steps', type=int, default=32)
 args_parser.add_argument('--num_global_steps', type=int, default=75000)
-args_parser.add_argument('--min_lr', type=float, default=3e-5)
 args_parser.add_argument('--learning_rate', type=float, default=3e-4)
 args_parser.add_argument('--lr_decay_iters', type=int, default=75000)
 args_parser.add_argument('--grad_clip', type=float, default=1.0)
@@ -65,13 +75,6 @@ args_parser.add_argument('--scale', type=float, default=0.25)
 args_parser.add_argument('--proj_type', type=str, default='std')
 
 args = args_parser.parse_args()
-
-# wandb logging
-wandb_project = 'Llama-Health-Chatbot'
-wandb_run_name = 'run' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-data_folder = '/data/datasets/openwebtext'
-output_dir = '/data/models/llama_health_galore'
 
 # Initialize the model
 model_config = llama_model.TransformerConfig()
@@ -109,8 +112,8 @@ if master_process:
     print(f'Number of tokens per iteration: {tokens_per_iter}')
     print(f'breakdown: {args.accumulation_steps} steps * {args.micro_batch_size} batch size * {args.max_seq_len} sequence length * {ddp_world_size} world size')
     # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
 
 torch.manual_seed(42 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -124,6 +127,7 @@ iter_batches = partial(
     batch_size=args.micro_batch_size,
     max_seq_len=args.max_seq_len,
     vocab_size=args.vocab_size,
+    dataset=args.dataset,
     device=device_type,
     num_workers=0,
 )
@@ -131,12 +135,27 @@ iter_batches = partial(
 
 def run_training():
     if master_process:
-        wandb.init(project=wandb_project, name=wandb_run_name)
+        wandb.init(project=args.wandb_project,
+                   name=(args.wandb_run_name + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')),
+                   config={k: v for k, v in vars(args).items()})
 
     scaler = GradScaler()
     device = torch.device(ddp_device if ddp else device_type)
     model = llama_model.Transformer(model_config)
     model = model.to(device)
+    if args.load_pretrained:
+        if args.pretrained_path is None:
+            ckpt_path = '/data/models/llama_health/model_step_74001.pt'
+        else:
+            ckpt_path = args.pretrained_path
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        state_dict = checkpoint['model']
+        unwanted_prefix = '_orig_mod.'
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+
     if args.compile_model:
         unoptimized_model = model
         model = torch.compile(model)
@@ -211,7 +230,7 @@ def run_training():
                 f'loss: {train_loss}, '
                 f'val_loss: {val_loss}, ')
 
-            if val_loss < best_val_loss:
+            if (val_loss < best_val_loss) or args.load_pretrained:
                 best_val_loss = val_loss
                 # Save the model
                 if global_step > 0:
@@ -227,7 +246,7 @@ def run_training():
                     print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
                     # save the model, new file for every 1000 steps
                     rounded_global_step = global_step // 1000 * 1000 + 1
-                    torch.save(checkpoint, os.path.join(output_dir, f'model_step_{rounded_global_step}.pt'))
+                    torch.save(checkpoint, os.path.join(args.output_dir, f'model_step_{rounded_global_step}.pt'))
 
         model.train()
 
