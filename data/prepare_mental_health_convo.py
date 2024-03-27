@@ -17,12 +17,20 @@ def clean_data(df):
 	return df
 
 
+def custom_replace(match):
+	# If the match is <user> or <agent>, keep it
+	if match.group(0) in ['<user>', '<agent>']:
+		return match.group(0)
+	# Otherwise, replace it with an empty string
+	return ""
+
+
 def clean_text(text):
-	text = str(text).lower()  # Convert text to lowercase
 	text = re.sub("[\[].*?[\]]", "", text)  # Remove text within square brackets
 	text = re.sub(r"http\S+", "", text)  # Remove URLs
-	text = re.sub(r"[^\w\s]", "", text)  # Remove non-alphanumeric characters (excluding spaces)
-	text = re.sub(r"\d+", "", text)  # Remove digits
+
+	# Match <user>, <agent>, or any non-alphanumeric character (excluding spaces)
+	text = re.sub(r"<user>|<agent>", custom_replace, text)
 	return text
 
 
@@ -43,26 +51,34 @@ def preprocess_data(df_init, context_format=None):
 	# Normalize Text
 	df_init = clean_data(df_init)
 	df = df_init.copy()
+
 	# For data 2, replace entities
-	if 'text' in df.columns:
-		df.loc[:, 'text'] = df['text'].apply(replace_entities)
+	if 'text' in df.columns.tolist() and 'questionText' not in df.columns.tolist():
+		# Replace entities
+		df['text'] = df['text'].apply(replace_entities)
 		df[['Context', 'Response']] = df['text'].str.split('\n', n=1, expand=True)
+		# Apply the clean_text function
+		df.loc[:, 'Context'] = df['Context'].apply(clean_text)
+		df.loc[:, 'Response'] = df['Response'].apply(clean_text)
 		df['Context'] = df['Context'].str.strip()
 		df['Response'] = df['Response'].str.strip()
+
 		df.drop('text', axis=1, inplace=True)
 	else:
 		# Add token
 		df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: "<user> " + str(x))
 		df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: "<agent> " + str(x))
-
-	# Apply the clean_text function
-	df.loc[:, context_format[0]] = df[context_format[0]].apply(clean_text)
-	df.loc[:, context_format[1]] = df[context_format[1]].apply(clean_text)
+		# Apply the clean_text function
+		df.loc[:, context_format[0]] = df[context_format[0]].apply(clean_text)
+		df.loc[:, context_format[1]] = df[context_format[1]].apply(clean_text)
 
 	# Remove escape sequences
 	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'\s+', ' ', x).strip())
 	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'\s+', ' ', x).strip())
 
+	# Check that every utterance start with a user or agent token
+	assert all(df[context_format[0]].apply(lambda x: x.startswith('<user>') or x.startswith('<agent>'))), \
+		'All utterances should start with <user> or <agent> token'
 	utterances = [{
 		"text": f"{row[context_format[0]].strip()} {row[context_format[1]].strip()}"
 	} for index, row in df.iterrows()]
