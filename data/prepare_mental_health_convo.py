@@ -76,6 +76,10 @@ def preprocess_data(df_init, context_format=None):
 	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'\s+', ' ', x).strip())
 	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'\s+', ' ', x).strip())
 
+	# add white space after period if there is none
+	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'(?<=[.])(?!\s)', ' ', x))
+	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'(?<=[.])(?!\s)', ' ', x))
+
 	# Check that every utterance start with a user or agent token
 	assert all(df[context_format[0]].apply(lambda x: x.startswith('<user>') or x.startswith('<agent>'))), \
 		'All utterances should start with <user> or <agent> token'
