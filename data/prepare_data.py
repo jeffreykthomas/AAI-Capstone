@@ -89,6 +89,16 @@ class Task:
             yield x, y
 
 
+def process_dataset(example, enc=Tokenizer('llama/models/tokenizer.model')):
+    if example is None or example['text'] is None:
+        print('Skipping example with None text')
+        return {'ids': [], 'len': 0}
+    text = example['text']
+    text = text.strip()
+    tokens = enc.encode(text, bos=True, eos=False)
+    return {'ids': tokens, 'len': len(tokens)}
+
+
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser()
     argparser.add_argument('--num_proc', type=int, default=32)
@@ -125,15 +135,6 @@ if __name__ == '__main__':
         train_val_dataset = data
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
-
-    def process_dataset(example):
-        if example is None or example['text'] is None:
-            print('Skipping example with None text')
-            return {'ids': [], 'len': 0}
-        text = example['text']
-        text = text.strip()
-        tokens = enc.encode(text, bos=True, eos=False)
-        return {'ids': tokens, 'len': len(tokens)}
 
 
     def filter_empty_entries(example):

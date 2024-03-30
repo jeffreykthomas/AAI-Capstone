@@ -21,20 +21,24 @@ import wandb
 from datetime import datetime
 
 from llama import model as llama_model
+from llama.load_model import load_model
 from data.prepare_data import Task
 
 import torch
+import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from transformers import get_cosine_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup, AutoModelForCausalLM
 
 args_parser = argparse.ArgumentParser()
 
 # Data Configuration
 args_parser.add_argument('--dataset', type=str, default='openwebtext')
 args_parser.add_argument('--load_pretrained', type=bool, default=False)
+args_parser.add_argument('--distill_training', action='store_true', help='Enable distillation training')
+args_parser.add_argument('--teacher_model', type=str, default='meta-llama/Llama-2-7b-hf')
 args_parser.add_argument('--pretrained_path', type=str, default=None)
 args_parser.add_argument('--output_dir', type=str, default='/data/models/llama_health_galore')
 args_parser.add_argument('--wandb_project', type=str, default='Llama-Health-Chatbot')
@@ -141,24 +145,37 @@ def run_training():
 
     scaler = GradScaler()
     device = torch.device(ddp_device if ddp else device_type)
-    model = llama_model.Transformer(model_config)
-    model = model.to(device)
+
     if args.load_pretrained:
         if args.pretrained_path is None:
             ckpt_path = '/data/models/llama_health/model_step_74001.pt'
         else:
             ckpt_path = args.pretrained_path
-        checkpoint = torch.load(ckpt_path, map_location=device)
-        state_dict = checkpoint['model']
-        unwanted_prefix = '_orig_mod.'
-        for k, v in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-        model.load_state_dict(state_dict)
+        model = load_model(ckpt_path, device)
+        model = model.to(device)
+    else:
+        model = llama_model.Transformer(model_config)
+        model = model.to(device)
 
     if args.compile_model:
         unoptimized_model = model
         model = torch.compile(model)
+
+    teacher_model = None
+    if args.distill_training:
+        model_name = args.teacher_model
+        cache_dir = '/data/hf_home/hub'
+        bnb_config = {
+            'load_in_4bit': True,
+            'bnb_4bit_compute_dtype': torch.bfloat16,
+            'bnb_4bit_quant_type': 'nf4',
+            'bnb_4bit_use_double_quant': True
+        }
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=bnb_config,
+            cache_dir=cache_dir
+        )
 
     optimizer = model.configure_optimizers(
         args.weight_decay,
@@ -180,6 +197,11 @@ def run_training():
         prefix = '_orig_mod.' if args.compile_model else ''
         model._ddp_params_and_buffers_to_ignore = {f'{prefix}freqs_cis'}
         model = DDP(model, device_ids=[ddp_local_rank])
+        if args.distill_training:
+            if teacher_model is None:
+                raise ValueError('Teacher model must be provided for distillation training')
+            teacher_model = DDP(teacher_model, device_ids=[ddp_local_rank])
+            teacher_model.eval()
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.num_global_steps
@@ -192,13 +214,24 @@ def run_training():
         for split in ['train', 'val']:
             batch_iter = iter_batches(split=split)
             losses = torch.zeros(args.eval_iters)  # keep on CPU
+            distill_losses = torch.zeros(args.eval_iters)  # keep on CPU
             for k in range(args.eval_iters):
                 X, y = next(batch_iter)
                 with autocast(dtype=ptdtype):
                     logits = model(X, y)
                     loss = raw_model.last_loss
+                    if args.distill_training:
+                        with torch.no_grad():
+                            teacher_output = teacher_model(X)
+                        teacher_logits = teacher_output.logits
+                        teacher_probs = F.softmax(teacher_logits, dim=-1)
+                        student_log_probs = F.log_softmax(logits, dim=-1)
+                        distill_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
                 losses[k] = loss.item()
+                distill_losses[k] = distill_loss.item()
             out[split] = losses.mean()
+            if args.distill_training:
+                out[f'{split}_distill'] = distill_losses.mean()
         model.train()
         return out
 
@@ -216,11 +249,18 @@ def run_training():
             losses = estimate_loss()
             val_loss = losses['val']
             train_loss = losses['train']
+            val_distill_loss = -1.0
+            train_distill_loss = -1.0
+            if args.distill_training:
+                val_distill_loss = losses['val_distill']
+                train_distill_loss = losses['train_distill']
             wandb.log(
                 {
                     'global_step': global_step,
                     'loss': train_loss,
                     'val_loss': val_loss,
+                    'train_distill_loss': train_distill_loss,
+                    'val_distill_loss': val_distill_loss,
                     'lr': scheduler.get_last_lr()[0],
                     'mfu': running_mfu * 100,
                 }
@@ -256,9 +296,20 @@ def run_training():
             with autocast(dtype=ptdtype):
                 # Forward pass
                 logits = model(X, y)
-                loss = raw_model.last_loss
-                # Normalize the loss
-                loss = loss / args.accumulation_steps
+                if not args.distill_training:
+                    loss = raw_model.last_loss
+                    # Normalize the loss
+                    loss = loss / args.accumulation_steps
+                else:
+                    # Distillation training
+                    with torch.no_grad():
+                        teacher_output = teacher_model(X)
+                    teacher_logits = teacher_output.logits
+                    teacher_probs = F.softmax(teacher_logits, dim=-1)
+                    student_log_probs = F.log_softmax(logits, dim=-1)
+                    loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                    loss = loss / args.accumulation_steps
+
             X, y = next(train_batch_iter)
             scaler.scale(loss).backward()
 
