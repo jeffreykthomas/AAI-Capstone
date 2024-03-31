@@ -1,3 +1,4 @@
 .idea
 *.pyc
 __pycache__/
+/rlhf_pipe/jt-designs-79-firebase-adminsdk-r3inm-6192f78083.json

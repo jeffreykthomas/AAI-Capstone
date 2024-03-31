@@ -22,7 +22,7 @@ val_samples = val_data['text'].tolist()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Load the model and tokenizer
-ckpt_path = '/data/models/llama_mh_dialogues/model_step_1001.pt'
+ckpt_path = '/data/models/llama_mh_dialogues/mh_fine_tune.pt'
 checkpoint = torch.load(ckpt_path, map_location=device)
 state_dict = checkpoint['model']
 model_config = checkpoint['model_config']

@@ -113,7 +113,7 @@ if __name__ == '__main__':
 
 	# train val split
 	train_data, val_data = train_test_split(all_data, test_size=0.1, random_state=42)
-	output_dir = '/data/datasets/mental_health_dialogues/'
+	output_dir = 'data/datasets/mental_health_dialogues/'
 	if not os.path.exists(output_dir):
 		os.makedirs(output_dir)
 	pd.DataFrame(train_data).to_csv(f'{output_dir}train_dataset.csv', index=False)
