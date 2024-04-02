@@ -27,10 +27,8 @@ class PretokDataset(torch.utils.data.IterableDataset):
 
         if self.dataset == 'openwebtext':
             self.save_data_path = '/data/datasets/openwebtext'
-        elif self.dataset == 'dialogues':
-            self.save_data_path = '/data/datasets/dialogues'
-        elif self.dataset == 'mental_health_dialogues':
-            self.save_data_path = '/data/datasets/mental_health_dialogues'
+        elif self.dataset in ['dialogues', 'llama-token-dialogues', 'mental_health_dialogues']:
+            self.save_data_path = f'/data/datasets/{self.dataset}'
 
     def __iter__(self):
         # get worker info within a DataLoader
@@ -89,13 +87,24 @@ class Task:
             yield x, y
 
 
-def process_dataset(example, enc=Tokenizer('llama/models/tokenizer.model')):
+def process_dataset(example, enc=Tokenizer('llama/models/tokenizer.model'), add_bos=True, add_eos=False, llama_tokens=False):
     if example is None or example['text'] is None:
         print('Skipping example with None text')
         return {'ids': [], 'len': 0}
     text = example['text']
     text = text.strip()
-    tokens = enc.encode(text, bos=True, eos=False)
+    if llama_tokens:
+        tokens = []
+        segments = text.split('<s>')
+
+        for i, segment in enumerate(segments):
+            sub_segments = segment.split('</s>')
+            for j, sub_segment in enumerate(sub_segments):
+                # Process each sub-segment
+                if sub_segment:  # Ignore empty strings
+                    tokens.extend(enc.encode(sub_segment, bos=True, eos=True))
+    else:
+        tokens = enc.encode(text, bos=add_bos, eos=add_eos)
     return {'ids': tokens, 'len': len(tokens)}
 
 
@@ -112,6 +121,8 @@ if __name__ == '__main__':
         save_data_path = '/data/datasets/openwebtext'
     elif args.dataset == 'dialogues':
         save_data_path = '/data/datasets/dialogues'
+    elif args.dataset == 'llama-token-dialogues':
+        save_data_path = '/data/datasets/llama-token-dialogues'
     elif args.dataset == 'mental_health_dialogues':
         save_data_path = '/data/datasets/mental_health_dialogues'
     else:
@@ -121,16 +132,10 @@ if __name__ == '__main__':
         data = load_dataset('openwebtext', num_proc=args.num_proc)
         train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
         train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
-    elif args.dataset == 'dialogues':
+    elif args.dataset in ['dialogues', 'llama-token-dialogues', 'mental_health_dialogues']:
         data = load_dataset('csv', data_files={
-            'train': '/data/datasets/dialogues/train_dataset.csv',
-            'val': '/data/datasets/dialogues/val_dataset.csv',
-        }, num_proc=args.num_proc)
-        train_val_dataset = data
-    elif args.dataset == 'mental_health_dialogues':
-        data = load_dataset('csv', data_files={
-            'train': '/data/datasets/mental_health_dialogues/train_dataset.csv',
-            'val': '/data/datasets/mental_health_dialogues/val_dataset.csv',
+            'train': f'/data/datasets/{args.dataset}/train_dataset.csv',
+            'val': f'/data/datasets/{args.dataset}/val_dataset.csv',
         }, num_proc=args.num_proc)
         train_val_dataset = data
     else:
@@ -142,7 +147,9 @@ if __name__ == '__main__':
         return example['len'] > 0
 
     # tokenize the data
-    tokenized_data = train_val_dataset.map(process_dataset, remove_columns=['text'], num_proc=args.num_proc)
+    llama_tokens = args.dataset == 'llama-token-dialogues'
+    tokenized_data = train_val_dataset.map(lambda example: process_dataset(example, llama_tokens=llama_tokens),
+                                           remove_columns=['text'], num_proc=args.num_proc)
 
     # Filter out any empty entries
     filtered_data = tokenized_data.filter(filter_empty_entries)
