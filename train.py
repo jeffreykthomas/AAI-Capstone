@@ -228,7 +228,8 @@ def run_training():
                         student_log_probs = F.log_softmax(logits, dim=-1)
                         distill_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
                 losses[k] = loss.item()
-                distill_losses[k] = distill_loss.item()
+                if args.distill_training:
+                    distill_losses[k] = distill_loss.item()
             out[split] = losses.mean()
             if args.distill_training:
                 out[f'{split}_distill'] = distill_losses.mean()
