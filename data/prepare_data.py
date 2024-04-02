@@ -26,11 +26,13 @@ class PretokDataset(torch.utils.data.IterableDataset):
         self.dataset = dataset
 
         if self.dataset == 'openwebtext':
-            self.save_data_path = '/data/datasets/openwebtext'
+            self.save_data_path = 'data/datasets/openwebtext'
+        elif self.dataset == 'TinyStories':
+            self.save_data_path = 'data/datasets/TinyStories'
         elif self.dataset == 'dialogues':
-            self.save_data_path = '/data/datasets/dialogues'
+            self.save_data_path = 'data/datasets/dialogues'
         elif self.dataset == 'mental_health_dialogues':
-            self.save_data_path = '/data/datasets/mental_health_dialogues'
+            self.save_data_path = 'data/datasets/mental_health_dialogues'
 
     def __iter__(self):
         # get worker info within a DataLoader
@@ -114,11 +116,17 @@ if __name__ == '__main__':
         save_data_path = '/data/datasets/dialogues'
     elif args.dataset == 'mental_health_dialogues':
         save_data_path = '/data/datasets/mental_health_dialogues'
+    elif args.dataset == 'TinyStories':
+        save_data_path = 'data/datasets/TinyStories'
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
 
     if args.dataset == 'openwebtext':
         data = load_dataset('openwebtext', num_proc=args.num_proc)
+        train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
+        train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
+    elif args.dataset == 'TinyStories':
+        data = load_dataset('roneneldan/TinyStories', num_proc=args.num_proc)
         train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
         train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
     elif args.dataset == 'dialogues':
