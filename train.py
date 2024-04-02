@@ -27,15 +27,20 @@ from data.prepare_data import Task
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
+from torch.cpu.amp import autocast as cpuAutocast
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from transformers import get_cosine_schedule_with_warmup, AutoModelForCausalLM
+from torch._dynamo import config
+config.suppress_errors=True
 
 args_parser = argparse.ArgumentParser()
 
 # Data Configuration
+args_parser.add_argument('--use_mps', action='store_true', help='Enable MPS')
 args_parser.add_argument('--dataset', type=str, default='openwebtext')
+args_parser.add_argument('--use_wandb', action='store_true', help='Enable Weights and Biases')
 args_parser.add_argument('--load_pretrained', type=bool, default=False)
 args_parser.add_argument('--distill_training', action='store_true', help='Enable distillation training')
 args_parser.add_argument('--teacher_model', type=str, default='meta-llama/Llama-2-7b-hf')
@@ -122,9 +127,8 @@ if master_process:
 torch.manual_seed(42 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+device_type = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 ptdtype = {'float32': torch.float32, 'float16': torch.float16, 'bfloat16': torch.bfloat16, 'float64': torch.float64}[dtype]
-
 
 iter_batches = partial(
     Task.iter_batches,
@@ -138,12 +142,14 @@ iter_batches = partial(
 
 
 def run_training():
-    if master_process:
+    if master_process and args.use_wandb:
         wandb.init(project=args.wandb_project,
                    name=(args.wandb_run_name + datetime.now().strftime('%Y-%m-%d_%H-%M-%S')),
                    config={k: v for k, v in vars(args).items()})
 
-    scaler = GradScaler()
+    scaler = None
+    if not args.use_mps:
+        scaler = GradScaler()
     device = torch.device(ddp_device if ddp else device_type)
 
     if args.load_pretrained:
@@ -217,18 +223,24 @@ def run_training():
             distill_losses = torch.zeros(args.eval_iters)  # keep on CPU
             for k in range(args.eval_iters):
                 X, y = next(batch_iter)
-                with autocast(dtype=ptdtype):
-                    logits = model(X, y)
-                    loss = raw_model.last_loss
-                    if args.distill_training:
-                        with torch.no_grad():
-                            teacher_output = teacher_model(X)
-                        teacher_logits = teacher_output.logits
-                        teacher_probs = F.softmax(teacher_logits, dim=-1)
-                        student_log_probs = F.log_softmax(logits, dim=-1)
-                        distill_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                if args.use_mps:
+                    with cpuAutocast():
+                        logits = model(X, y)
+                        loss = raw_model.last_loss
+                else:
+                    with autocast(device.type, dtype=ptdtype):
+                        logits = model(X, y)
+                        loss = raw_model.last_loss
+                        if args.distill_training:
+                            with torch.no_grad():
+                                teacher_output = teacher_model(X)
+                            teacher_logits = teacher_output.logits
+                            teacher_probs = F.softmax(teacher_logits, dim=-1)
+                            student_log_probs = F.log_softmax(logits, dim=-1)
+                            distill_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
                 losses[k] = loss.item()
-                distill_losses[k] = distill_loss.item()
+                if args.distill_training:
+                    distill_losses[k] = distill_loss.item()
             out[split] = losses.mean()
             if args.distill_training:
                 out[f'{split}_distill'] = distill_losses.mean()
@@ -254,17 +266,18 @@ def run_training():
             if args.distill_training:
                 val_distill_loss = losses['val_distill']
                 train_distill_loss = losses['train_distill']
-            wandb.log(
-                {
-                    'global_step': global_step,
-                    'loss': train_loss,
-                    'val_loss': val_loss,
-                    'train_distill_loss': train_distill_loss,
-                    'val_distill_loss': val_distill_loss,
-                    'lr': scheduler.get_last_lr()[0],
-                    'mfu': running_mfu * 100,
-                }
-            )
+            if args.use_wandb:
+                wandb.log(
+                    {
+                        'global_step': global_step,
+                        'loss': train_loss,
+                        'val_loss': val_loss,
+                        'train_distill_loss': train_distill_loss,
+                        'val_distill_loss': val_distill_loss,
+                        'lr': scheduler.get_last_lr()[0],
+                        'mfu': running_mfu * 100,
+                    }
+                )
             print(
                 f'\nStep {global_step + 1}, '
                 f'loss: {train_loss}, '
@@ -278,7 +291,7 @@ def run_training():
                         'model': raw_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'model_config': model_config,
-                        'scaler': scaler.state_dict(),
+                        'scaler': scaler.state_dict() if not args.use_mps else None,
                         'scheduler': scheduler.state_dict(),
                         'best_val_loss': best_val_loss,
                         'global_step': global_step
@@ -293,33 +306,45 @@ def run_training():
         for micro_step in range(args.accumulation_steps):
             if ddp:
                 model.require_backward_grad_sync = micro_step == args.accumulation_steps - 1
-            with autocast(dtype=ptdtype):
-                # Forward pass
-                logits = model(X, y)
-                if not args.distill_training:
+            if args.use_mps:
+                with cpuAutocast():
+                    logits = model(X, y)
                     loss = raw_model.last_loss
-                    # Normalize the loss
                     loss = loss / args.accumulation_steps
-                else:
-                    # Distillation training
-                    with torch.no_grad():
-                        teacher_output = teacher_model(X)
-                    teacher_logits = teacher_output.logits
-                    teacher_probs = F.softmax(teacher_logits, dim=-1)
-                    student_log_probs = F.log_softmax(logits, dim=-1)
-                    loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
-                    loss = loss / args.accumulation_steps
+            else:
+                with autocast(dtype=ptdtype):
+                    # Forward pass
+                    logits = model(X, y)
+                    if not args.distill_training:
+                        loss = raw_model.last_loss
+                        # Normalize the loss
+                        loss = loss / args.accumulation_steps
+                    else:
+                        # Distillation training
+                        with torch.no_grad():
+                            teacher_output = teacher_model(X)
+                        teacher_logits = teacher_output.logits
+                        teacher_probs = F.softmax(teacher_logits, dim=-1)
+                        student_log_probs = F.log_softmax(logits, dim=-1)
+                        loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                        loss = loss / args.accumulation_steps
 
             X, y = next(train_batch_iter)
-            scaler.scale(loss).backward()
+            if args.use_mps:
+                loss.backward()
+            else:
+                scaler.scale(loss).backward()
 
-        if args.grad_clip != 0.0:
+        if args.grad_clip != 0.0 and not args.use_mps:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
         # Perform optimization step
-        scaler.step(optimizer)
-        scaler.update()
+        if args.use_mps:
+            optimizer.step()
+        else:
+            scaler.step(optimizer)
+            scaler.update()
 
         # Zero gradients
         optimizer.zero_grad()
