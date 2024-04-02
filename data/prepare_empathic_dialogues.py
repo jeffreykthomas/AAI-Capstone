@@ -3,17 +3,28 @@ import re
 import pandas as pd
 from datasets import load_dataset
 
-user_token = '<user>'
-agent_token = '<agent>'
+user_token = '<User>'
+agent_token = '<Assistant>'
+system_token = '''
+<s>[INST] <<SYS>>\n You are a helpful, respectful, expert mental health assistant. 
+Respond to the User with empathy and respect. <</SYS>>\n\n
+'''
+start_instruction_token = '[INST] '
+end_instruction_token = ' [/INST] '
+bos_token = '<s>'
+eos_token = ' </s>'
 train_data = []
 val_data = []
 test_data = []
 all_data = [train_data, val_data, test_data]
 
 
-def remove_user_turn_if_last(example, user_token, agent_token):
-	if example.rfind(user_token) > example.rfind(agent_token):
-		example = example[:example.rfind(user_token)]
+def remove_user_turn_if_last(example):
+	# check to see if the example ends with the end_instruction_token;
+	# if so, remove the last user turn by finding the last eos_token
+	if example.endswith(end_instruction_token):
+		example = example[:example.rfind(eos_token)] + eos_token
+		example = example.strip()
 	return example
 
 
@@ -32,20 +43,22 @@ def prepare_empathetic_dialogues():
 			if new_turn[0] == current_conv_idx:
 				utterance_idx = int(new_turn[1])
 				if (utterance_idx % 2) == 0:
-					current_conversation += ' ' + agent_token + ' ' + new_utterance
+					# Assistant's turn
+					current_conversation += new_utterance + eos_token
 				else:
-					current_conversation += ' ' + user_token + ' ' + new_utterance
+					# User's turn
+					current_conversation += bos_token + start_instruction_token + new_utterance + end_instruction_token
 			else:
 				if current_conversation != '':
 					# if user has the last turn, remove the last turn
-					current_conversation = remove_user_turn_if_last(current_conversation, user_token, agent_token)
+					current_conversation = remove_user_turn_if_last(current_conversation)
 					all_data[split].append({"text": current_conversation})
 				current_conv_idx = new_turn[0]
-				current_conversation = user_token + ' ' + new_utterance
+				current_conversation = system_token + new_utterance + end_instruction_token
 
 			if i == len(df) - 1:
 				# if user has the last turn, remove the last turn
-				current_conversation = remove_user_turn_if_last(current_conversation, user_token, agent_token)
+				current_conversation = remove_user_turn_if_last(current_conversation)
 				all_data[split].append({"text": current_conversation})
 
 
@@ -67,14 +80,19 @@ def prepare_daily_dialog():
 		for j in range(len(dataset[split])):
 			utterances = dataset[split][j]['dialog']
 			utterances = [clean_punctuation(utterance.strip()) for utterance in utterances]
+
 			current_conversation = ''
 			for k in range(len(utterances)):
-				if k % 2 == 0:
-					current_conversation += ' ' + user_token + ' ' + utterances[k]
+				if k == 0:
+					current_conversation = system_token + utterances[0] + end_instruction_token
 				else:
-					current_conversation += ' ' + agent_token + ' ' + utterances[k]
+					if k % 2 == 0:
+						# User's turn
+						current_conversation += bos_token + start_instruction_token + utterances[k] + end_instruction_token
+					else:
+						current_conversation += utterances[k] + eos_token
 			# if user has the last turn, remove the last turn
-			current_conversation = remove_user_turn_if_last(current_conversation, user_token, agent_token)
+			current_conversation = remove_user_turn_if_last(current_conversation)
 			current_conversation = current_conversation.strip()
 			all_data[i].append({"text": current_conversation})
 
@@ -82,8 +100,8 @@ def prepare_daily_dialog():
 if __name__ == '__main__':
 	prepare_empathetic_dialogues()
 	prepare_daily_dialog()
-	# Save the data
-	output_dir = '/data/datasets/dialogues/'
+	# Save the datas
+	output_dir = '/data/datasets/llama-token-dialogues/'
 	if not os.path.exists(output_dir):
 		os.makedirs(output_dir)
 	# Save the data
