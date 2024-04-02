@@ -5,12 +5,14 @@ from llama.tokenizer import Tokenizer
 import firebase_admin
 from firebase_admin import credentials, firestore
 import json
+from tqdm import tqdm
 
-df_test = pd.read_csv('data/empathetic_dialogues/val_dataset.csv')
+df_test = pd.read_csv('data/mental_health_dialogues/val_dataset.csv')
 
 # generate examples from test data and upload to firestore
 checkpoint_path = 'llama/models/mh_fine_tune.pt'
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+# device = 'cpu'
 
 model = load_model(checkpoint_path, map_location=device)
 print(f"Using device: {device}")
@@ -20,23 +22,30 @@ model.eval()
 
 # Generate examples
 generated_examples = []
+# randomly pick 200 prompts from the test data
+df_test = df_test.sample(n=200)
+# reset index
+df_test.reset_index(drop=True, inplace=True)
 for idx, row in df_test.iterrows():
 	print(f"Generating examples for prompt {idx} of {len(df_test)}")
 	context = row['text']
 	user_message, _ = context.split(' <agent>', 1)
 	user_message = user_message + ' <agent>'
-	input_ids = tokenizer.encode(user_message, eos=True, bos=False)
-	input_tensors = torch.tensor(input_ids).unsqueeze(0).to(device)
+	print(f"Generated examples for prompt: {user_message}")
+
+	input_ids = tokenizer.encode(user_message, bos=True, eos=False)
+	input_tensors = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(device)
 	with torch.no_grad():
-		generated_text_1 = model.generate(input_tensors, max_new_tokens=256)
-		generated_text_2 = model.generate(input_tensors, max_new_tokens=256)
-	decoded_text_1 = tokenizer.decode(generated_text_1.cpu().numpy().tolist()[0])
-	decoded_text_2 = tokenizer.decode(generated_text_2.cpu().numpy().tolist()[0])
+		generated_text_1 = model.generate(input_tensors, 512)
+		generated_text_2 = model.generate(input_tensors, 512)
+	generated_text_1 = generated_text_1.cpu().numpy().tolist()
+	generated_text_2 = generated_text_2.cpu().numpy().tolist()
+	decoded_text_1 = tokenizer.decode(generated_text_1[0])
+	decoded_text_2 = tokenizer.decode(generated_text_2[0])
 	generated_examples.append({
 		'prompt': user_message,
 		'responses': [decoded_text_1, decoded_text_2]
 	})
-	print(f"Generated examples for prompt: {user_message}")
 	print(f"Response 1: {decoded_text_1}")
 	print(f"Response 2: {decoded_text_2}")
 
@@ -57,8 +66,15 @@ for prompt in prompts:
 		'current': False
 	})
 
-doc_ref = db.collection('prompts').document()
-doc_ref.set({
-	'current': True,
-	'prompts': generated_examples
-})
+batch = db.batch()
+for example in generated_examples:
+	doc_ref = db.collection('prompts').document()
+	batch.set(doc_ref, {
+		'current': True,
+		'prompt': example['prompt'],
+		'responses': example['responses'],
+		'votes': [],
+		'id': doc_ref.id
+	})
+
+batch.commit()
