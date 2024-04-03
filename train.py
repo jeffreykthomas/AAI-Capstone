@@ -38,6 +38,8 @@ args_parser = argparse.ArgumentParser()
 args_parser.add_argument('--dataset', type=str, default='openwebtext')
 args_parser.add_argument('--load_pretrained', type=bool, default=False)
 args_parser.add_argument('--distill_training', action='store_true', help='Enable distillation training')
+args_parser.add_argument('--temperature', type=float, default=10.0)
+args_parser.add_argument('--alpha', type=float, default=0.7)
 args_parser.add_argument('--teacher_model', type=str, default='meta-llama/Llama-2-7b-hf')
 args_parser.add_argument('--pretrained_path', type=str, default=None)
 args_parser.add_argument('--output_dir', type=str, default='/data/models/llama_health_galore')
@@ -305,9 +307,13 @@ def run_training():
                     with torch.no_grad():
                         teacher_output = teacher_model(X)
                     teacher_logits = teacher_output.logits
-                    teacher_probs = F.softmax(teacher_logits, dim=-1)
-                    student_log_probs = F.log_softmax(logits, dim=-1)
-                    loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                    teacher_probs = F.softmax(teacher_logits / args.temperature, dim=-1)
+                    student_log_probs = F.log_softmax(logits / args.temperature, dim=-1)
+                    distillation_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                    ce_loss = raw_model.last_loss
+
+                    # Combine the two losses
+                    loss = args.alpha * distillation_loss + (1 - args.alpha) * ce_loss
                     loss = loss / args.accumulation_steps
 
             X, y = next(train_batch_iter)
