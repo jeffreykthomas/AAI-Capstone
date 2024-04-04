@@ -226,9 +226,14 @@ def run_training():
                         with torch.no_grad():
                             teacher_output = teacher_model(X)
                         teacher_logits = teacher_output.logits
-                        teacher_probs = F.softmax(teacher_logits, dim=-1)
-                        student_log_probs = F.log_softmax(logits, dim=-1)
-                        distill_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                        teacher_probs = F.softmax(teacher_logits / args.temperature, dim=-1)
+                        student_log_probs = F.log_softmax(logits / args.temperature, dim=-1)
+                        distillation_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
+                        ce_loss = raw_model.last_loss
+
+                        # Combine the two losses
+                        distill_loss = args.alpha * distillation_loss + (1 - args.alpha) * ce_loss
+                        distill_loss = distill_loss / args.accumulation_steps
                 losses[k] = loss.item()
                 distill_losses[k] = distill_loss.item()
             out[split] = losses.mean()
