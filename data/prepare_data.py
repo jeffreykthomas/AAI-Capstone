@@ -27,7 +27,9 @@ class PretokDataset(torch.utils.data.IterableDataset):
 
         if self.dataset == 'openwebtext':
             self.save_data_path = '/data/datasets/openwebtext'
-        elif self.dataset in ['dialogues', 'llama-token-dialogues', 'mental_health_dialogues']:
+        elif self.dataset in [
+            'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
+        ]:
             self.save_data_path = f'/data/datasets/{self.dataset}'
 
     def __iter__(self):
@@ -119,12 +121,10 @@ if __name__ == '__main__':
     # Save the tokenized data to this directory
     if args.dataset == 'openwebtext':
         save_data_path = '/data/datasets/openwebtext'
-    elif args.dataset == 'dialogues':
-        save_data_path = '/data/datasets/dialogues'
-    elif args.dataset == 'llama-token-dialogues':
-        save_data_path = '/data/datasets/llama-token-dialogues'
-    elif args.dataset == 'mental_health_dialogues':
-        save_data_path = '/data/datasets/mental_health_dialogues'
+    elif args.dataset in [
+        'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
+    ]:
+        save_data_path = f'/data/datasets/{args.dataset}'
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
 
@@ -132,7 +132,9 @@ if __name__ == '__main__':
         data = load_dataset('openwebtext', num_proc=args.num_proc)
         train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
         train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
-    elif args.dataset in ['dialogues', 'llama-token-dialogues', 'mental_health_dialogues']:
+    elif args.dataset in [
+        'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
+    ]:
         data = load_dataset('csv', data_files={
             'train': f'/data/datasets/{args.dataset}/train_dataset.csv',
             'val': f'/data/datasets/{args.dataset}/val_dataset.csv',
@@ -147,7 +149,8 @@ if __name__ == '__main__':
         return example['len'] > 0
 
     # tokenize the data
-    llama_tokens = args.dataset == 'llama-token-dialogues'
+    llama_tokens = args.dataset in ['llama-token-dialogues', 'mental-health-dialogues-llama-tokens']
+    print(f'Using llama tokens: {llama_tokens}')
     tokenized_data = train_val_dataset.map(lambda example: process_dataset(example, llama_tokens=llama_tokens),
                                            remove_columns=['text'], num_proc=args.num_proc)
 

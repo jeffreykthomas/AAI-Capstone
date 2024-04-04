@@ -3,8 +3,6 @@ import re
 import pandas as pd
 from datasets import load_dataset
 
-user_token = '<User>'
-agent_token = '<Assistant>'
 system_token = '''
 <s>[INST] <<SYS>>\n You are a helpful, respectful, expert mental health assistant. 
 Respond to the User with empathy and respect. <</SYS>>\n\n
