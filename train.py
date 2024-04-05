@@ -26,11 +26,14 @@ from data.prepare_data import Task
 
 import torch
 import torch.nn.functional as F
+
 from torch.cuda.amp import autocast, GradScaler
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from transformers import get_cosine_schedule_with_warmup, AutoModelForCausalLM
+from galore_torch import GaLoreAdamW8bit
+import bitsandbytes as bnb
 
 args_parser = argparse.ArgumentParser()
 
@@ -79,6 +82,8 @@ args_parser.add_argument('--rank', type=int, default=128)
 args_parser.add_argument('--update_proj_gap', type=int, default=200)
 args_parser.add_argument('--scale', type=float, default=0.25)
 args_parser.add_argument('--proj_type', type=str, default='std')
+args_parser.add_argument('--layer_wise', action='store_true', help='Enable layer-wise quantization')
+
 
 args = args_parser.parse_args()
 
@@ -188,8 +193,10 @@ def run_training():
         args.rank,
         args.update_proj_gap,
         args.scale,
-        args.proj_type)
-    
+        args.proj_type,
+        args.layer_wise
+    )
+
     # Print number of parameters
     if master_process:
         print(f'Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
@@ -205,9 +212,11 @@ def run_training():
             teacher_model = DDP(teacher_model, device_ids=[ddp_local_rank])
             teacher_model.eval()
 
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.num_global_steps
-    )
+    scheduler = None
+    if not args.layer_wise:
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.num_global_steps
+        )
 
     @torch.no_grad()
     def estimate_loss():
@@ -261,6 +270,10 @@ def run_training():
             if args.distill_training:
                 val_distill_loss = losses['val_distill']
                 train_distill_loss = losses['train_distill']
+            if not args.layer_wise:
+                lr = scheduler.get_last_lr()[0]
+            else:
+                lr = None
             wandb.log(
                 {
                     'global_step': global_step,
@@ -268,7 +281,7 @@ def run_training():
                     'val_loss': val_loss,
                     'train_distill_loss': train_distill_loss,
                     'val_distill_loss': val_distill_loss,
-                    'lr': scheduler.get_last_lr()[0],
+                    'lr': lr,
                     'mfu': running_mfu * 100,
                 }
             )
@@ -281,15 +294,25 @@ def run_training():
                 best_val_loss = val_loss
                 # Save the model
                 if global_step > 0:
-                    checkpoint = {
-                        'model': raw_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'model_config': model_config,
-                        'scaler': scaler.state_dict(),
-                        'scheduler': scheduler.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'global_step': global_step
-                    }
+                    if scheduler is not None:
+                        checkpoint = {
+                            'model': raw_model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'model_config': model_config,
+                            'scaler': scaler.state_dict(),
+                            'scheduler': scheduler.state_dict(),
+                            'best_val_loss': best_val_loss,
+                            'global_step': global_step
+                        }
+                    else:
+                        checkpoint = {
+                            'model': raw_model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'model_config': model_config,
+                            'scaler': scaler.state_dict(),
+                            'best_val_loss': best_val_loss,
+                            'global_step': global_step
+                        }
                     print(f'Saving model with val_loss: {best_val_loss} and global_step: {global_step}')
                     # save the model, new file for every 1000 steps
                     rounded_global_step = global_step // 1000 * 1000 + 1
@@ -324,17 +347,18 @@ def run_training():
             X, y = next(train_batch_iter)
             scaler.scale(loss).backward()
 
-        if args.grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        if not args.layer_wise:
+            if args.grad_clip != 0.0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
-        # Perform optimization step
-        scaler.step(optimizer)
-        scaler.update()
+            # Perform optimization step
+            scaler.step(optimizer)
+            scaler.update()
 
-        # Zero gradients
-        optimizer.zero_grad()
-        scheduler.step()
+            # Zero gradients
+            optimizer.zero_grad()
+            scheduler.step()
 
         t1 = time.time()
         dt = t1 - t0
@@ -345,15 +369,25 @@ def run_training():
             if local_iter_num >= 5:
                 mfu = raw_model.estimate_mfu(args.micro_batch_size * args.accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-            print(
-                f'\r{global_step + 1}/{args.num_global_steps} | '
-                f'loss {lossf:.4f} | '
-                f'lr {scheduler.get_last_lr()[0]:e} | '
-                f'{dt*1000:.2f}ms | '
-                f'mfu {running_mfu*100:.2f}%',
-                end='',
-                flush=True
-            )
+            if scheduler is not None:
+                print(
+                    f'\r{global_step + 1}/{args.num_global_steps} | '
+                    f'loss {lossf:.4f} | '
+                    f'lr {scheduler.get_last_lr()[0]:e} | '
+                    f'{dt*1000:.2f}ms | '
+                    f'mfu {running_mfu*100:.2f}%',
+                    end='',
+                    flush=True
+                )
+            else:
+                print(
+                    f'\r{global_step + 1}/{args.num_global_steps} | '
+                    f'loss {lossf:.4f} | '
+                    f'{dt*1000:.2f}ms | '
+                    f'mfu {running_mfu*100:.2f}%',
+                    end='',
+                    flush=True
+                )
 
         local_iter_num += 1
 
