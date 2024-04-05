@@ -66,11 +66,10 @@ class ChatEnvironment(gym.Env):
 		# Generate a response using your model. This is simplified; actual implementation will vary.
 		# Example: action could determine response generation parameters
 		with torch.no_grad():
-			response1 = self.rl_model.generate(self.current_state, 256)
-			response2 = self.rl_model.generate(self.current_state, 256)
+			response = self.rl_model.generate(self.current_state, 512)
 
 		# Calculate reward based on the generated response
-		reward = self.reward_function(self.reward_model, self.tokenizer, self.current_state, response1, response2)
+		reward = self.reward_function(self.reward_model, self.tokenizer, self.current_state, response)
 
 		# Update conversation state based on the reward
 		if reward[0] > reward[1]:
