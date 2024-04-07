@@ -229,11 +229,10 @@ def run_training():
                         teacher_probs = F.softmax(teacher_logits / args.temperature, dim=-1)
                         student_log_probs = F.log_softmax(logits / args.temperature, dim=-1)
                         distillation_loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
-                        ce_loss = raw_model.last_loss
 
                         # Combine the two losses
-                        distill_loss = args.alpha * distillation_loss + (1 - args.alpha) * ce_loss
-                        distill_loss = distill_loss / args.accumulation_steps
+                        distill_loss = args.alpha * distillation_loss + (1 - args.alpha) * loss
+
                 losses[k] = loss.item()
                 if args.distill_training:
                     distill_losses[k] = distill_loss.item()
