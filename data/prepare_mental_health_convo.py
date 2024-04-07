@@ -66,6 +66,9 @@ def preprocess_data(df_init, context_format=None):
 	# add white space after period if there is none
 	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'(?<=[.])(?!\s)', ' ', x))
 	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'(?<=[.])(?!\s)', ' ', x))
+	# add white space after comma, question mark, or explanation mark if there is none
+	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'(?<=[,!?])(?!\s)', ' ', x))
+	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'(?<=[,!?])(?!\s)', ' ', x))
 
 	utterances = [{
 		"text": f"{row[context_format[0]].strip()} {row[context_format[1]].strip()} </s>"
@@ -97,7 +100,9 @@ if __name__ == '__main__':
 
 	# train val split
 	train_data, val_data = train_test_split(all_data, test_size=0.1, random_state=42)
+
 	output_dir = '/data/datasets/mental-health-dialogues-llama-tokens/'
+
 	if not os.path.exists(output_dir):
 		os.makedirs(output_dir)
 	pd.DataFrame(train_data).to_csv(f'{output_dir}train_dataset.csv', index=False)
