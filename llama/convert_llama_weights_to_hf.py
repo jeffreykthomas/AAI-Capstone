@@ -84,7 +84,7 @@ def write_json(text, path):
 
 
 def write_model(
-    model_path, input_base_path, model_size, tokenizer_path=None, safe_serialization=True, llama_version=1
+    model_path, input_base_path, model_size, weight_filename, tokenizer_path=None, safe_serialization=True, llama_version=1
 ):
     # for backward compatibility, before you needed the repo to be called `my_repo/model_size`
     if not os.path.isfile(os.path.join(input_base_path, "params.json")):
@@ -145,8 +145,7 @@ def write_model(
         # Not sharded
         # (The sharded implementation would also work, but this is simpler.)
         if llama_version == 0:
-            ckpt_path = '/data/models/llama_health/model_step_74001.pt'
-            print(f"Sys path: {sys.path}")
+            ckpt_path = os.path.join(input_base_path, weight_filename)
             checkpoint = torch.load(ckpt_path, map_location='cpu')
             loaded = checkpoint['model']
             unwanted_prefix = '_orig_mod.'
@@ -318,6 +317,10 @@ def main():
         help="Location of LLaMA weights, which contains tokenizer.model and model folders",
     )
     parser.add_argument(
+        "--weight_filename",
+        help="Name of the weight file to load."
+    )
+    parser.add_argument(
         "--model_size",
         choices=["750M", "7B", "7Bf", "13B", "13Bf", "30B", "34B", "65B", "70B", "70Bf", "tokenizer_only"],
         help="'f' models correspond to the finetuned versions, and are specific to the Llama2 official release. For more details on Llama2, checkout the original repo: https://huggingface.co/meta-llama",
@@ -342,6 +345,7 @@ def main():
             model_path=args.output_dir,
             input_base_path=args.input_dir,
             model_size=args.model_size,
+            weight_filename=args.weight_filename,
             safe_serialization=args.safe_serialization,
             tokenizer_path=spm_path,
             llama_version=args.llama_version,
