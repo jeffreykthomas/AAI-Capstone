@@ -28,7 +28,11 @@ class PretokDataset(torch.utils.data.IterableDataset):
         if self.dataset == 'openwebtext':
             self.save_data_path = '/data/datasets/openwebtext'
         elif self.dataset in [
-            'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
+            'dialogues',
+            'llama-token-dialogues',
+            'mental_health_dialogues',
+            'mental-health-dialogues-llama-tokens',
+            'generated_data'
         ]:
             self.save_data_path = f'/data/datasets/{self.dataset}'
 
@@ -125,6 +129,8 @@ if __name__ == '__main__':
         'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
     ]:
         save_data_path = f'/data/datasets/{args.dataset}'
+    elif args.dataset == 'generated_data':
+        save_data_path = '/data/datasets/generated_data'
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
 
@@ -140,6 +146,13 @@ if __name__ == '__main__':
             'val': f'/data/datasets/{args.dataset}/val_dataset.csv',
         }, num_proc=args.num_proc)
         train_val_dataset = data
+    elif args.dataset == 'generated_data':
+        data = load_dataset('csv', data_files={
+            'train': 'data/datasets/generated_data/train.csv',
+            'val': 'data/datasets/generated_data/val.csv',
+            'test': 'data/datasets/generated_data/test.csv',
+        }, num_proc=args.num_proc)
+        train_val_dataset = data
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
 
@@ -150,8 +163,9 @@ if __name__ == '__main__':
 
     # tokenize the data
     llama_tokens = args.dataset in ['llama-token-dialogues', 'mental-health-dialogues-llama-tokens']
+    add_bos_token = args.dataset not in ['generated_data']
     print(f'Using llama tokens: {llama_tokens}')
-    tokenized_data = train_val_dataset.map(lambda example: process_dataset(example, llama_tokens=llama_tokens),
+    tokenized_data = train_val_dataset.map(lambda example: process_dataset(example, add_bos=add_bos_token, llama_tokens=llama_tokens),
                                            remove_columns=['text'], num_proc=args.num_proc)
 
     # Filter out any empty entries
