@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# run using python -m llama.convert_llama_weights_to_hf  --input_dir /data/models/llama_health --model_size 750M --llama_version 0 --output_dir /data/llama-mental-health
+# run using python -m llama.convert_llama_weights_to_hf  --input_dir /data/models/llama_health --weight_path model_step_1001.pt --model_size 750M --llama_version 0 --output_dir /data/models/llama-mental-health
 import argparse
 import gc
 import json
@@ -23,6 +23,7 @@ import sys
 import torch
 
 from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizer
+import argparse
 
 
 try:
@@ -338,6 +339,8 @@ def main():
         type=int,
         help="Version of the Llama model to convert. Currently supports Llama1 and Llama2. Controls the context size",
     )
+    parser.add_argument('--weights_path', type=str, default='/data/models/llama_health/model_step_74001.pt')
+
     args = parser.parse_args()
     spm_path = os.path.join(args.input_dir, "tokenizer.model")
     if args.model_size != "tokenizer_only":
