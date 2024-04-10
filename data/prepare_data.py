@@ -2,7 +2,7 @@
 # from project root run: python -m data.prepare_data
 
 import os
-import sys
+import argparse
 import random
 import glob
 from tqdm import tqdm
@@ -11,48 +11,30 @@ from llama.tokenizer import Tokenizer
 from datasets import load_dataset
 import torch
 import torch.distributed as dist
-
-num_proc = 32
-enc = Tokenizer('llama/models/tokenizer.model')
-
-dataset = 'openwebtext'
-
-if dataset == 'openwebtext':
-    save_data_path = '/data/datasets/openwebtext'
-else:
-    save_data_path = '/data/datasets/slim-pajama-tokenized'
-
-cache_dir = os.environ.get('HF_HOME', None)
-if cache_dir is None:
-    print('Cache directory is not specified. Please set the HF_HOME environment variable or specify a cache_dir.')
-    sys.exit(1)
-
-# Check if the directory exists
-if not os.path.exists(cache_dir):
-    print(f'Cache directory does not exist: {cache_dir}')
-    sys.exit(1)
-
-# Check if the directory is writable
-if not os.access(cache_dir, os.W_OK):
-    print(f'Cache directory is not writable: {cache_dir}')
-    sys.exit(1)
-
-# Check if the directory is readable
-if not os.access(cache_dir, os.R_OK):
-    print(f'Cache directory is not readable: {cache_dir}')
-    sys.exit(1)
-
-print(f'Using cache directory: {cache_dir}')
+import torch.nn.functional as F
 
 
+# Create a custom PyTorch Dataset for loading the pretokenized data
 class PretokDataset(torch.utils.data.IterableDataset):
     '''Loads pretokenized examples from disk and yields them as PyTorch tensors.'''
 
-    def __init__(self, split, max_seq_len, vocab_size):
+    def __init__(self, split, max_seq_len, vocab_size, dataset):
         super().__init__()
         self.split = split
         self.max_seq_len = max_seq_len
         self.vocab_size = vocab_size
+        self.dataset = dataset
+
+        if self.dataset == 'openwebtext':
+            self.save_data_path = '/data/datasets/openwebtext'
+        elif self.dataset in [
+            'dialogues',
+            'llama-token-dialogues',
+            'mental_health_dialogues',
+            'mental-health-dialogues-llama-tokens',
+            'generated_data'
+        ]:
+            self.save_data_path = f'/data/datasets/{self.dataset}'
 
     def __iter__(self):
         # get worker info within a DataLoader
@@ -66,7 +48,7 @@ class PretokDataset(torch.utils.data.IterableDataset):
         print(f'\nRank {rank}, Worker {worker_id}: Created a pre-tokenized Dataset with rng seed {seed}')
 
         # the .bin files are right along the .json files
-        bin_dir = save_data_path
+        bin_dir = self.save_data_path
         shard_filenames = sorted(glob.glob(os.path.join(bin_dir, '*.bin')))
 
         # train/val split. train.bin for train, val.bin for val
@@ -89,6 +71,11 @@ class PretokDataset(torch.utils.data.IterableDataset):
                     chunk = torch.from_numpy((m[start:end]).astype(np.int64))
                     x = chunk[:-1]
                     y = chunk[1:]
+                    pad_length = self.max_seq_len - len(x)
+                    pad_token_id = 2
+                    if pad_length > 0:
+                        x = F.pad(x, (0, pad_length), value=pad_token_id)
+                        y = F.pad(y, (0, pad_length), value=pad_token_id)
                     yield x, y
 
 
@@ -106,61 +93,89 @@ class Task:
             yield x, y
 
 
-# Function to filter out unwanted set names
-def filter_fn(example):
-    return example['meta']['redpajama_set_name'] not in excluded_sets
+def process_dataset(example, enc=Tokenizer('llama/models/tokenizer.model'), add_bos=True, add_eos=False, llama_tokens=False):
+    if example is None or example['text'] is None:
+        print('Skipping example with None text')
+        return {'ids': [], 'len': 0}
+    text = example['text']
+    text = text.strip()
+    if llama_tokens:
+        tokens = []
+        segments = text.split('<s>')
+
+        for i, segment in enumerate(segments):
+            sub_segments = segment.split('</s>')
+            for j, sub_segment in enumerate(sub_segments):
+                # Process each sub-segment
+                if sub_segment:  # Ignore empty strings
+                    tokens.extend(enc.encode(sub_segment, bos=True, eos=True))
+    else:
+        tokens = enc.encode(text, bos=add_bos, eos=add_eos)
+    return {'ids': tokens, 'len': len(tokens)}
 
 
 if __name__ == '__main__':
-    if dataset == 'openwebtext':
-        data = load_dataset('openwebtext', num_proc=num_proc)
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument('--num_proc', type=int, default=32)
+    argparser.add_argument('--dataset', type=str, default='openwebtext', help='openwebtext or empathetic_dialogues')
+    args = argparser.parse_args()
+
+    enc = Tokenizer('llama/models/tokenizer.model')
+
+    # Save the tokenized data to this directory
+    if args.dataset == 'openwebtext':
+        save_data_path = '/data/datasets/openwebtext'
+    elif args.dataset in [
+        'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
+    ]:
+        save_data_path = f'/data/datasets/{args.dataset}'
+    elif args.dataset == 'generated_data':
+        save_data_path = '/data/datasets/generated_data'
+    else:
+        raise ValueError(f'Unknown dataset: {args.dataset}')
+
+    if args.dataset == 'openwebtext':
+        data = load_dataset('openwebtext', num_proc=args.num_proc)
         train_val_dataset = data['train'].train_test_split(test_size=0.0005, seed=42, shuffle=True)
         train_val_dataset['val'] = train_val_dataset.pop('test')  # rename test to val
+    elif args.dataset in [
+        'dialogues', 'llama-token-dialogues', 'mental_health_dialogues', 'mental-health-dialogues-llama-tokens'
+    ]:
+        data = load_dataset('csv', data_files={
+            'train': f'/data/datasets/{args.dataset}/train_dataset.csv',
+            'val': f'/data/datasets/{args.dataset}/val_dataset.csv',
+        }, num_proc=args.num_proc)
+        train_val_dataset = data
+    elif args.dataset == 'generated_data':
+        data = load_dataset('csv', data_files={
+            'train': 'data/datasets/generated_data/train.csv',
+            'val': 'data/datasets/generated_data/val.csv',
+            'test': 'data/datasets/generated_data/test.csv',
+        }, num_proc=args.num_proc)
+        train_val_dataset = data
     else:
-        # Define a list of set names to exclude
-        excluded_sets = ['RedPajamaGithub']
+        raise ValueError(f'Unknown dataset: {args.dataset}')
 
-        train_data_files_pattern = '/data/datasets/SlimPajama-627B/train/chunk*/**/*.jsonl.zst'
-        val_data_files_pattern = '/data/datasets/SlimPajama-627B/validation/chunk*/**/*.jsonl.zst'
-        # Load the predefined splits from the dataset
-        data_train = (load_dataset(
-            'json',
-            data_files=train_data_files_pattern,
-            split='train',
-            num_proc=num_proc,
-            keep_in_memory=False)
-                      .filter(filter_fn))
-        data_val = (load_dataset(
-            'json',
-            data_files=val_data_files_pattern,
-            split='validation',
-            num_proc=num_proc,
-            keep_in_memory=False)
-                    .filter(filter_fn))
 
-        # Concatenate the training and validation datasets
-        train_val_dataset = {
-            'train': data_train,
-            'val': data_val
-        }
+    def filter_empty_entries(example):
+        # Keep the example only if 'len' is greater than 0
+        return example['len'] > 0
 
+    # tokenize the data
+    llama_tokens = args.dataset in ['llama-token-dialogues', 'mental-health-dialogues-llama-tokens']
+    add_bos_token = args.dataset not in ['generated_data']
+    print(f'Using llama tokens: {llama_tokens}')
+    tokenized_data = train_val_dataset.map(lambda example: process_dataset(example, add_bos=add_bos_token, llama_tokens=llama_tokens),
+                                           remove_columns=['text'], num_proc=args.num_proc)
+
+    # Filter out any empty entries
+    filtered_data = tokenized_data.filter(filter_empty_entries)
     # Ensure your save path exists
     os.makedirs(save_data_path, exist_ok=True)
 
-
-    def process_dataset(example):
-        text = example['text']
-        text.strip()
-        tokens = enc.encode(text, bos=True, eos=False)
-        return {'ids': tokens, 'len': len(tokens)}
-
-
-    # tokenize the data
-    tokenized_data = train_val_dataset.map(process_dataset, remove_columns=['text'], num_proc=num_proc)
-
     # save the tokenized data
     # Iterate over each split in the tokenized dataset
-    for split, dataset in tokenized_data.items():
+    for split, dataset in filtered_data.items():
         # Calculate the total length of all tokenized sequences in the dataset
         total_length = np.sum(dataset['len'], dtype=np.uint64)
         filename = os.path.join(save_data_path, f'{split}.bin')
@@ -172,7 +187,7 @@ if __name__ == '__main__':
         # Initialize the start index for writing to the memory-mapped array
         write_position = 0
         # The number of batches to divide the dataset into for processing
-        total_batches = 1024
+        total_batches = 1024 if len(dataset) > 1024 else len(dataset)
 
         # Iterate over each batch, showing progress with tqdm
         for batch_index in tqdm(range(total_batches), desc=f'Writing to {filename}'):
