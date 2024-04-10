@@ -5,6 +5,15 @@ from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
+system_token = '''
+<s>[INST] <<SYS>>\n You are a helpful, respectful, expert mental health assistant. 
+Respond to the User with empathy and respect. <</SYS>>\n\n
+'''
+start_instruction_token = '[INST] '
+end_instruction_token = ' [/INST] '
+bos_token = '<s>'
+eos_token = ' </s>'
+
 
 def clean_data(df):
 	# Drop null rows
@@ -17,28 +26,11 @@ def clean_data(df):
 	return df
 
 
-def custom_replace(match):
-	# If the match is <user> or <agent>, keep it
-	if match.group(0) in ['<user>', '<agent>']:
-		return match.group(0)
-	# Otherwise, replace it with an empty string
-	return ""
-
-
-def clean_text(text):
-	text = re.sub("[\[].*?[\]]", "", text)  # Remove text within square brackets
-	text = re.sub(r"http\S+", "", text)  # Remove URLs
-
-	# Match <user>, <agent>, or any non-alphanumeric character (excluding spaces)
-	text = re.sub(r"<user>|<agent>", custom_replace, text)
-	return text
-
-
 def replace_entities(text):
 	# Replace <HUMAN> with <user>
-	text = text.replace('<HUMAN>', '<user>')
+	text = text.replace('<HUMAN>', system_token)
 	# Replace <ASSISTANT> with <agent>
-	text = text.replace('<ASSISTANT>', '<agent>')
+	text = text.replace('<ASSISTANT>', end_instruction_token)
 	# Replace : with space
 	text = text.replace(':', '')
 	return text
@@ -57,20 +49,15 @@ def preprocess_data(df_init, context_format=None):
 		# Replace entities
 		df['text'] = df['text'].apply(replace_entities)
 		df[['Context', 'Response']] = df['text'].str.split('\n', n=1, expand=True)
-		# Apply the clean_text function
-		df.loc[:, 'Context'] = df['Context'].apply(clean_text)
-		df.loc[:, 'Response'] = df['Response'].apply(clean_text)
+
 		df['Context'] = df['Context'].str.strip()
 		df['Response'] = df['Response'].str.strip()
 
 		df.drop('text', axis=1, inplace=True)
 	else:
 		# Add token
-		df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: "<user> " + str(x))
-		df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: "<agent> " + str(x))
-		# Apply the clean_text function
-		df.loc[:, context_format[0]] = df[context_format[0]].apply(clean_text)
-		df.loc[:, context_format[1]] = df[context_format[1]].apply(clean_text)
+		df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: system_token + str(x))
+		df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: end_instruction_token + str(x))
 
 	# Remove escape sequences
 	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'\s+', ' ', x).strip())
@@ -79,12 +66,12 @@ def preprocess_data(df_init, context_format=None):
 	# add white space after period if there is none
 	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'(?<=[.])(?!\s)', ' ', x))
 	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'(?<=[.])(?!\s)', ' ', x))
+	# add white space after comma, question mark, or explanation mark if there is none
+	df.loc[:, context_format[0]] = df[context_format[0]].apply(lambda x: re.sub(r'(?<=[,!?])(?!\s)', ' ', x))
+	df.loc[:, context_format[1]] = df[context_format[1]].apply(lambda x: re.sub(r'(?<=[,!?])(?!\s)', ' ', x))
 
-	# Check that every utterance start with a user or agent token
-	assert all(df[context_format[0]].apply(lambda x: x.startswith('<user>') or x.startswith('<agent>'))), \
-		'All utterances should start with <user> or <agent> token'
 	utterances = [{
-		"text": f"{row[context_format[0]].strip()} {row[context_format[1]].strip()}"
+		"text": f"{row[context_format[0]].strip()} {row[context_format[1]].strip()} </s>"
 	} for index, row in df.iterrows()]
 
 	return utterances
@@ -113,7 +100,9 @@ if __name__ == '__main__':
 
 	# train val split
 	train_data, val_data = train_test_split(all_data, test_size=0.1, random_state=42)
-	output_dir = 'data/datasets/mental_health_dialogues/'
+
+	output_dir = '/data/datasets/mental-health-dialogues-llama-tokens/'
+
 	if not os.path.exists(output_dir):
 		os.makedirs(output_dir)
 	pd.DataFrame(train_data).to_csv(f'{output_dir}train_dataset.csv', index=False)
