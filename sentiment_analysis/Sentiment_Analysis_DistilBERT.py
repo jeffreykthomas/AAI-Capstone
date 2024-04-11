@@ -20,7 +20,7 @@ from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from transformers import DistilBertTokenizer, AutoTokenizer
 
-df_preprocessed = pd.read_csv('processed.csv')
+df_preprocessed = pd.read_csv('../data/processed.csv')
 df_preprocessed.head(10)
 
 model_ckpt = "distilbert-base-uncased"

@@ -256,7 +256,7 @@ df_cleaned['tokens'] = df_cleaned['lemmas'].apply(tokenize)
 file_name = '/content/processed.csv'
 df_cleaned.to_csv(file_name, index=False)
 
-df_preprocessed = pd.read_csv('processed.csv')
+df_preprocessed = pd.read_csv('../data/processed.csv')
 df_preprocessed.head(10)
 
 
