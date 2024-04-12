@@ -10,8 +10,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
 
-df_preprocessed = pd.read_csv('data/processed.csv')
-df_preprocessed.head(10)
+df_preprocessed = pd.read_csv('data/datasets/goEmotions/goemotions_cleaned.csv')
 
 model_ckpt = "/data/models/distilbert-base-uncased"
 pretrained_model_path = 'distilbert-base-uncased'
@@ -106,13 +105,13 @@ def compute_metrics(pred):
     return {"accuracy": acc, "f1": f1}
 
 
-batch_size = 64
+batch_size = 32
 logging_steps = len(emotions_encoded) // batch_size
 model_name = f"{model_ckpt}-finetuned-emotion"
-num_epochs = 12
-num_warmup_steps = 2000
+num_epochs = 8
+num_warmup_steps = 500
 training_args = TrainingArguments(output_dir=model_name, num_train_epochs=num_epochs,
-                                  learning_rate=5e-05,
+                                  learning_rate=8e-06,
                                   lr_scheduler_type='cosine',
                                   warmup_steps=num_warmup_steps,
                                   per_device_train_batch_size=batch_size,
