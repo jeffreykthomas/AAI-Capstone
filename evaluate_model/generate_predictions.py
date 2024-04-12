@@ -4,7 +4,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import argparse
 
-df = pd.read_csv('data/datasets/RogueEval/predictions.csv')
+df = pd.read_csv('data/datasets/Predictions/predictions.csv')
 df = df.sample(100)
 df = df.reset_index(drop=True)
 
