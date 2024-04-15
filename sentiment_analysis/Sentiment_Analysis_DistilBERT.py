@@ -10,51 +10,58 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
 
-df_preprocessed = pd.read_csv('data/datasets/goEmotions/goemotions_cleaned.csv')
+df_train = pd.read_csv('data/datasets/goEmotions/train.csv')
+df_val = pd.read_csv('data/datasets/goEmotions/validate.csv')
+df_test = pd.read_csv('data/datasets/goEmotions/test.csv')
 
 model_ckpt = "/data/models/distilbert-base-uncased"
 pretrained_model_path = 'distilbert-base-uncased'
 tokenizer = DistilBertTokenizer.from_pretrained(pretrained_model_path)
 
 
-def tokenize(text, max_length=200):
-    if text is None:
-        text = ''
-    return tokenizer(text, padding='max_length', truncation=True)
+df_train['input_ids'] = None
+df_train['attention_mask'] = None
+
+df_val['input_ids'] = None
+df_val['attention_mask'] = None
+
+df_test['input_ids'] = None
+df_test['attention_mask'] = None
 
 
-df_preprocessed['input_ids'] = None
-df_preprocessed['attention_mask'] = None
+def tokenize(df):
+    for index, row in df.iterrows():
+        tokenized_output = tokenizer(row['cleaned_text'], padding='max_length', truncation=True)
+        df.at[index, 'input_ids'] = tokenized_output['input_ids']
+        df.at[index, 'attention_mask'] = tokenized_output['attention_mask']
+    return df
 
-for index, row in df_preprocessed.iterrows():
-    tokenized_output = tokenize(row['cleaned_text'])
-    df_preprocessed.at[index, 'input_ids'] = tokenized_output['input_ids']
-    df_preprocessed.at[index, 'attention_mask'] = tokenized_output['attention_mask']
 
-label_list = df_preprocessed['emotion_label'].unique()
+df_train = tokenize(df_train)
+df_val = tokenize(df_val)
+df_test = tokenize(df_test)
+
+label_list = df_train['emotion_label'].unique()
 num_labels = len(label_list)
 print('Labels: ', label_list, '\n Qty:', num_labels)
 
 label_encoder = LabelEncoder()
-labels = label_encoder.fit_transform(df_preprocessed['emotion_label'])
+train_labels = label_encoder.fit_transform(df_train['emotion_label'])
+val_labels = label_encoder.transform(df_val['emotion_label'])
+test_labels = label_encoder.transform(df_test['emotion_label'])
 
-emotions_encoded = pd.DataFrame(columns=['attention_mask', 'input_ids', 'label',
-                                         'text'])
-emotions_encoded['attention_mask'] = df_preprocessed['attention_mask']
-emotions_encoded['input_ids'] = df_preprocessed['input_ids']
-emotions_encoded['label'] = labels
-emotions_encoded['text'] = df_preprocessed['cleaned_text']
+df_train['label'] = train_labels
+df_val['label'] = val_labels
+df_test['label'] = test_labels
 
-train_df, val_df = train_test_split(
-    emotions_encoded,
-    test_size=0.2,
-    stratify=emotions_encoded['label'],
-    random_state=42
-)
+# Rename cleaned_text to text
+df_train = df_train.rename(columns={'cleaned_text': 'text'})
+df_val = df_val.rename(columns={'cleaned_text': 'text'})
+df_test = df_test.rename(columns={'cleaned_text': 'text'})
 
-input_ids = torch.tensor(train_df['input_ids'].tolist())
-attention_mask = torch.tensor(train_df['attention_mask'].tolist())
-labels = torch.tensor(train_df['label'].tolist())
+input_ids = torch.tensor(df_train['input_ids'].tolist())
+attention_mask = torch.tensor(df_train['attention_mask'].tolist())
+labels = torch.tensor(df_train['label'].tolist())
 
 
 class CustomDataset(Dataset):
@@ -79,9 +86,9 @@ print('Attention mask shape:', attention_mask.shape)
 print('Labels shape:', labels.shape)
 train_dataset = CustomDataset(input_ids, attention_mask, labels)
 
-val_input_ids = torch.tensor(val_df['input_ids'].tolist())
-val_attention_mask = torch.tensor(val_df['attention_mask'].tolist())
-val_labels = torch.tensor(val_df['label'].tolist())
+val_input_ids = torch.tensor(df_val['input_ids'].tolist())
+val_attention_mask = torch.tensor(df_val['attention_mask'].tolist())
+val_labels = torch.tensor(df_val['label'].tolist())
 
 val_dataset = CustomDataset(val_input_ids, val_attention_mask, val_labels)
 
@@ -106,7 +113,7 @@ def compute_metrics(pred):
 
 
 batch_size = 32
-logging_steps = len(emotions_encoded) // batch_size
+logging_steps = len(df_train) // batch_size
 model_name = f"{model_ckpt}-finetuned-emotion"
 num_epochs = 8
 num_warmup_steps = 500
@@ -126,3 +133,18 @@ trainer = Trainer(model=model, args=training_args,
                   tokenizer=tokenizer)
 
 trainer.train()
+
+test_input_ids = torch.tensor(df_test['input_ids'].tolist())
+test_attention_mask = torch.tensor(df_test['attention_mask'].tolist())
+test_labels = torch.tensor(df_test['label'].tolist())
+
+test_dataset = CustomDataset(test_input_ids, test_attention_mask, test_labels)
+
+# print test results
+test_results = trainer.predict(test_dataset)
+print(test_results.metrics)
+
+# Save the model
+model.save_pretrained(model_name)
+tokenizer.save_pretrained(model_name)
+
