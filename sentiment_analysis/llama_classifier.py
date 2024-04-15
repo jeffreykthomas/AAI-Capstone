@@ -5,7 +5,8 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from datasets import Dataset, DatasetDict, load_metric
+from datasets import Dataset, DatasetDict
+import evaluate
 from transformers import DataCollatorWithPadding, AutoTokenizer, AutoModelForCausalLM
 import torch.optim as optim
 import wandb
@@ -13,10 +14,10 @@ from datetime import datetime
 
 
 # Config
-num_epochs = 3
-batch_size = 8
+num_epochs = 2
+batch_size = 16
 learning_rate = 1e-6
-num_layers_freeze = 0
+num_layers_freeze = 16
 
 save_dir = '/data/models/llama_classifier_model/'
 
@@ -46,9 +47,16 @@ def tokenize(batch):
 
 
 class SentimentModel(nn.Module):
-    def __init__(self, llama_model, num_labels):
+    def __init__(self, llama_model, num_labels, num_layers_freeze=0):
         super(SentimentModel, self).__init__()
         self.base_model = load_model(llama_model)
+        # Freeze 'num_layers_freeze' layers in the base model
+        layer_count = 0
+        for name, child in self.base_model.named_modules():
+            if layer_count < num_layers_freeze:
+                for param in child.parameters():
+                    param.requires_grad = False
+            layer_count += 1
         self.num_labels = num_labels
         # Classifier to be applied on pooled output
         self.classifier = nn.Linear(self.base_model.config.vocab_size, num_labels)
@@ -70,7 +78,7 @@ df_train, df_val = train_test_split(df_train, test_size=0.1, random_state=42)
 
 model_name = 'jeffreykthomas/llama-mental-health-base'
 num_labels = df_train['emotion_label'].nunique()
-model = SentimentModel(model_name, num_labels)
+model = SentimentModel(model_name, num_labels, num_layers_freeze=num_layers_freeze)
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = model.to(device) 
@@ -108,7 +116,8 @@ train_dataloader = DataLoader(tokenized_dataset["train"], shuffle=True, batch_si
 val_dataloader = DataLoader(tokenized_dataset["validation"], batch_size=batch_size, collate_fn=data_collator, drop_last=True)
 test_data_loader = DataLoader(tokenized_dataset["test"], batch_size=batch_size, collate_fn=data_collator, drop_last=True)
 
-metric = load_metric('accuracy')
+metric_accuracy = evaluate.load('accuracy')
+metric_f1 = evaluate.load('f1')
 best_val_loss = float('inf')
 lossfn = nn.CrossEntropyLoss()
 
@@ -156,7 +165,7 @@ for epoch in range(num_epochs):
                 loss = lossfn(outputs, batch['labels']) 
                 
             _, predictions = torch.max(outputs, dim=1)
-            metric.add_batch(predictions=predictions, references=batch["labels"])
+            metric_accuracy.add_batch(predictions=predictions, references=batch["labels"])
             progress_bar_eval.update(1)
             progress_bar_eval.set_description(f"Epoch {epoch + 1}/{num_epochs}, Val loss: {loss.item()}")
             total_val_loss += loss.item()
@@ -166,10 +175,29 @@ for epoch in range(num_epochs):
         best_val_loss = avg_val_loss
         torch.save(model.state_dict(), f'{save_dir}model.pth')
         
-    epoch_metrics = metric.compute()
+    epoch_metrics = metric_accuracy.compute()
 
     wandb.log({
         'train_loss': avg_train_loss,
         'val_loss': avg_val_loss,
         'val_accuracy': epoch_metrics['accuracy'],
     })
+
+# evaluate accuracy and f1 on test dataloader
+model.load_state_dict(torch.load(f'{save_dir}model.pth'))
+model.eval()
+with torch.no_grad():
+    for batch in test_data_loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        outputs = model(**batch)
+        _, predictions = torch.max(outputs, dim=1)
+        metric_accuracy.add_batch(predictions=predictions, references=batch["labels"])
+        metric_f1.add_batch(predictions=predictions, references=batch["labels"])
+
+accuracy = metric_accuracy.compute()
+f1 = metric_f1.compute(average='weighted')
+
+wandb.log({
+    'test_accuracy': accuracy['accuracy'],
+    'test_f1': f1['f1']
+})
