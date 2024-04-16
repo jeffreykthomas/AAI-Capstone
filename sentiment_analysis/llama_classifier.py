@@ -11,13 +11,14 @@ from transformers import DataCollatorWithPadding, AutoTokenizer, AutoModelForCau
 import torch.optim as optim
 import wandb
 from datetime import datetime
-
+from transformers import get_cosine_schedule_with_warmup
 
 # Config
 num_epochs = 2
 batch_size = 16
-learning_rate = 1e-6
-num_layers_freeze = 16
+learning_rate = 8e-6
+num_layers_freeze = 0
+warmup_steps = 500
 
 save_dir = '/data/models/llama_classifier_model/'
 
@@ -81,9 +82,7 @@ num_labels = df_train['emotion_label'].nunique()
 model = SentimentModel(model_name, num_labels, num_layers_freeze=num_layers_freeze)
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = model.to(device) 
-
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+model = model.to(device)
 tokenizer = load_tokenizer(model_name)
 
 unique_labels = df_train['emotion_label'].unique()
@@ -125,6 +124,11 @@ num_training_steps = num_epochs * len(train_dataloader)
 progress_bar_train = tqdm(range(num_training_steps))
 progress_bar_eval = tqdm(range(num_epochs * len(val_dataloader)))
 
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+scheduler = get_cosine_schedule_with_warmup(
+            optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps
+        )
+
 # Logging
 wandb.init(project='llama-sentiment-analysis',
            name='run' + datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -147,6 +151,7 @@ for epoch in range(num_epochs):
         loss = lossfn(outputs, batch['labels']) 
         loss.backward()
         optimizer.step()
+        scheduler.step()
         optimizer.zero_grad()
         progress_bar_train.update(1)
         progress_bar_train.set_description(f"Epoch {epoch + 1}/{num_epochs}, Train loss: {loss.item()}")
