@@ -1,23 +1,22 @@
 import pandas as pd
-import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, f1_score
 
 from transformers import DistilBertTokenizer, DistilBertForSequenceClassification, DistilBertConfig
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
 
-df_train = pd.read_csv('data/datasets/goEmotions/train.csv')
-df_val = pd.read_csv('data/datasets/goEmotions/validate.csv')
-df_test = pd.read_csv('data/datasets/goEmotions/test.csv')
+df = pd.read_csv('data/datasets/goEmotions/cleaned_data.csv')
 
 model_ckpt = "/data/models/distilbert-base-uncased"
 pretrained_model_path = 'distilbert-base-uncased'
 tokenizer = DistilBertTokenizer.from_pretrained(pretrained_model_path)
 
+# Train, val, test split
+df_train, df_test = train_test_split(df, test_size=0.1, random_state=42)
+df_train, df_val = train_test_split(df_train, test_size=0.1, random_state=42)
 
 df_train['input_ids'] = None
 df_train['attention_mask'] = None
@@ -31,7 +30,7 @@ df_test['attention_mask'] = None
 
 def tokenize(df):
     for index, row in df.iterrows():
-        tokenized_output = tokenizer(row['cleaned_text'], padding='max_length', truncation=True)
+        tokenized_output = tokenizer(row['text'], padding='max_length', truncation=True)
         df.at[index, 'input_ids'] = tokenized_output['input_ids']
         df.at[index, 'attention_mask'] = tokenized_output['attention_mask']
     return df
